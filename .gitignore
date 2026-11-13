@@ -208,3 +208,5 @@ local-paths.cmd
 # 但编译缓存不要提交
 程序/python/Lib/**/__pycache__/
 程序/python/Lib/**/*.py[cod]
+# 临时文件（提交信息草稿等）
+*.tmp
