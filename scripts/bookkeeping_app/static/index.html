@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My Economic · 我的经济</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20261114-rename">
+</head>
+<body>
+  <div class="app">
+    <nav>
+      <div class="brand">
+        <h1>My Economic</h1>
+        <p>我的经济</p>
+      </div>
+      <div class="nav-group">
+        <button class="active" data-view="home">总览</button>
+        <button data-view="entries">账单</button>
+        <button data-view="confirm"><span>待确认</span><span class="nav-badge hidden" id="pendingNavBadge">0</span></button>
+        <button data-view="assets">账户</button>
+        <button data-view="settings">设置</button>
+      </div>
+    </nav>
+    <main>
+      <header>
+        <div class="title">
+          <div class="title-row">
+            <h2 id="pageTitle">财务总览</h2>
+            <div class="view-tabs title-tabs hidden" id="confirmModeTabs">
+              <button class="active" data-confirm-mode="pending" type="button">待确认</button>
+              <button data-confirm-mode="quality" type="button">待质量审核</button>
+            </div>
+          </div>
+          <div class="muted" id="status"></div>
+        </div>
+        <div class="toolbar">
+          <div class="search-box hidden" id="searchWrap">
+            <input id="search" placeholder="搜索账单、备注、账户">
+          </div>
+          <button class="primary" id="quickAdd">快速记账</button>
+          <a class="secondary" href="/api/export.csv">导出</a>
+        </div>
+      </header>
+
+      <section class="period-panel" id="periodPanel">
+        <div class="period-tabs">
+          <button data-period-mode="all">全部</button><span>|</span>
+          <button data-period-mode="year">年</button><span>|</span>
+          <button class="active" data-period-mode="month">月</button><span>|</span>
+          <button data-period-mode="more">更多</button>
+        </div>
+        <div class="period-row">
+          <div class="period-range">
+            <span>范围：</span>
+            <button class="period-step hidden" id="prevCycle">‹</button>
+            <button class="date-trigger" id="rangeStartTrigger"><span id="rangeStartText">--/--/--</span><span>▾</span></button>
+            <span>-</span>
+            <button class="date-trigger" id="rangeEndTrigger"><span id="rangeEndText">--/--/--</span><span>▾</span></button>
+            <button class="period-step hidden" id="nextCycle">›</button>
+          </div>
+          <div class="more-periods hidden" id="moreControls">
+            <div class="cycle-label">周期</div>
+            <div class="cycle-tags">
+              <button class="active" data-cycle="quarter">季</button>
+              <button data-cycle="week">周</button>
+              <button data-cycle="day">日</button>
+            </div>
+          </div>
+        </div>
+        <div class="date-popover hidden" id="datePicker">
+          <div class="date-picker-head">
+            <select id="datePickerYear"></select>
+            <select id="datePickerMonth"></select>
+          </div>
+          <div class="date-weekdays"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>
+          <div class="date-grid" id="datePickerGrid"></div>
+        </div>
+      </section>
+
+      <section id="quickForm" class="section quick-form hidden">
+        <h3>快速记账</h3>
+        <div class="form">
+          <div class="quick-main-row">
+            <div class="quick-fields">
+              <label>类型<select id="fType"><option>支出</option><option>收入</option><option>转账</option><option>借入</option><option>借出</option><option>还款</option><option>收款</option><option>期初资金</option></select></label>
+              <label id="fCategoryWrap">分类<select id="fCategory"></select></label>
+              <label>金额<input id="fAmount" placeholder="0.00" inputmode="decimal"></label>
+              <label>时间<input id="fTime" type="datetime-local"></label>
+              <label id="fAccountWrap">账户<select id="fAccount"></select></label>
+              <label id="fTargetAccountWrap" class="hidden">转入账户<select id="fTargetAccount"></select></label>
+            </div>
+            <div class="quick-actions">
+              <button class="link-button" id="toggleQuickMore" type="button">展开</button>
+              <button class="primary" id="saveEntry">保存</button>
+            </div>
+          </div>
+          <div class="quick-more-fields hidden" id="quickMoreFields">
+            <label>交易对象<input id="fTransactionObject" placeholder="对方名称、债务人或平台"></label>
+            <label>备注<input id="fNote" placeholder="补充说明"></label>
+            <label class="muted form-check">
+              <input type="checkbox" id="fLearn">
+              <span>学习关键词规则</span>
+              <span class="help-tip" tabindex="0" aria-label="说明">?
+                <span class="help-tip-content">勾选后，会把当前交易对象和分类保存为规则；以后相同关键词的账单会优先自动归到这个分类。</span>
+              </span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section id="home" class="view grid">
+        <!-- 首次使用引导：只在账本为空（entries 总数 = 0）时显示，有账目后自动消失 -->
+        <div class="first-run-guide hidden" id="firstRunGuide"></div>
+        <div class="grid kpis">
+          <div class="kpi kpi-action" id="incomeKpi"><div class="label">收入</div><div class="metric income" id="mIncome">0.00</div></div>
+          <div class="kpi kpi-action" id="expenseKpi"><div class="label">支出</div><div class="metric expense" id="mExpense">0.00</div></div>
+          <div class="kpi"><div class="label">结余</div><div class="metric" id="mBalance">0.00</div></div>
+          <div class="kpi"><div class="label">待确认</div><div class="metric" id="mPending">0</div></div>
+        </div>
+        <div class="grid overview-visuals">
+          <div class="section trend-card">
+            <div class="section-head">
+              <h3>收支趋势</h3>
+              <div class="level-switch trend-mode-switch" id="trendModeSwitch" role="group" aria-label="收支趋势图表类型">
+                <button type="button" data-trend-mode="bar">柱状</button>
+                <button type="button" data-trend-mode="line">折线</button>
+              </div>
+            </div>
+            <div class="chart-wrap"><canvas id="cashflowTrend" width="900" height="220"></canvas><div class="chart-tip" id="cashflowTrendTip"></div></div>
+          </div>
+          <div class="grid pie-grid">
+            <div class="section pie-card">
+              <h3>收入分类占比</h3>
+              <div class="chart-wrap"><canvas id="incomePie" width="500" height="500"></canvas><div class="chart-tip" id="incomePieTip"></div></div>
+            </div>
+            <div class="section pie-card">
+              <div class="section-head">
+                <h3>支出分类占比</h3>
+                <div class="level-switch" aria-label="支出分类层级">
+                  <button class="active" data-expense-category-level="major">大类</button>
+                  <button data-expense-category-level="minor">小类</button>
+                </div>
+              </div>
+              <div class="chart-wrap"><canvas id="expensePie" width="500" height="500"></canvas><div class="chart-tip" id="expensePieTip"></div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="entries" class="view section hidden">
+        <div class="view-tabs" id="entryModeTabs">
+          <button class="active" data-entry-mode="list">条目统计</button>
+          <button data-entry-mode="category">按分类查找</button>
+          <button data-entry-mode="counterparty">交互消费统计</button>
+        </div>
+        <div id="entryTable"></div>
+        <div id="categoryBrowser" class="hidden"></div>
+        <div id="counterpartyView" class="hidden"></div>
+      </section>
+      <section id="confirm" class="view grid pending-layout hidden">
+        <aside class="section">
+          <h3>待确认概览</h3>
+          <div id="pendingSummary" class="side-list"></div>
+          <div class="pending-tools">
+            <button class="secondary" id="pendingUndoBtn" type="button" disabled>← 返回上一条</button>
+            <button class="secondary" id="pendingBatchBtn" type="button">按对象批量</button>
+          </div>
+        </aside>
+        <div id="pendingBatch" class="section hidden"></div>
+        <div class="pending-stack" id="pendingList"></div>
+        <div id="qualityPanel" class="section quality-panel hidden">
+          <div class="section-head">
+            <h3>待质量审核</h3>
+            <span class="muted" id="qualityScanHint">本地只读扫描</span>
+          </div>
+          <p class="muted quality-intro">本地只读扫描，不消耗 token，不会修改任何账目。扫描四类问题：内部划转被当收入 / 疑似重复 / 孤儿分类 / 异常大额。进入本页不会自动扫描，点下面的「开始扫描」才开始。</p>
+          <div class="quality-actions">
+            <button class="primary" id="qualityScanBtn" type="button">开始扫描</button>
+            <button class="secondary" id="qualityBackBtn" type="button">← 返回待确认</button>
+          </div>
+          <div id="qualityResult" class="quality-result"></div>
+        </div>
+      </section>
+      <section id="assets" class="view grid asset-grid hidden">
+        <div class="section"><h3>账户余额</h3><div id="initialFundLocator"></div><div id="initialFundHint"></div><div id="assetList"></div></div>
+        <div class="section"><h3>应收应付</h3><div id="debtList"></div></div>
+      </section>
+      <section id="settings" class="view section settings-page hidden">
+        <div class="settings-block">
+          <div class="section-head">
+            <h3>外观设置</h3>
+          </div>
+          <div class="settings-list">
+            <label class="settings-row">
+              <span>
+                <strong>深色主题</strong>
+                <em>切换仪表盘的明暗外观</em>
+              </span>
+              <input type="checkbox" id="themeToggle">
+            </label>
+            <label class="settings-row">
+              <span>
+                <strong>红绿反色</strong>
+                <em>仅影响收入和支出金额的颜色</em>
+              </span>
+              <input type="checkbox" id="colorInvert">
+            </label>
+          </div>
+        </div>
+        <div class="settings-block" id="rulesHubBlock">
+          <div class="section-head">
+            <h3>规则与筛选中台</h3>
+            <button class="secondary" id="openRulePanel" type="button">查看规则</button>
+          </div>
+          <div class="hub-list">
+            <div class="hub-item">
+              <button class="settings-collapse-btn hub-toggle" id="categoryHubToggle" type="button" aria-expanded="false" aria-controls="categoryHubBody">
+                <span class="settings-collapse-arrow" aria-hidden="true">▾</span>
+                <span class="settings-collapse-title">修改分类</span>
+                <em class="hub-hint">增删改分类树 · 新建大分类</em>
+              </button>
+              <div class="hub-body hidden" id="categoryHubBody">
+                <div class="type-tabs" id="categoryEditorTypes"></div>
+                <div id="categoryEditor" class="category-editor"></div>
+                <div class="category-rule-form">
+                  <label>新建大分类<input id="newMajorCategory" placeholder="例如：餐饮、交通、学习"></label>
+                  <button class="primary" id="addMajorCategory" type="button">新建大分类</button>
+                </div>
+              </div>
+            </div>
+            <div class="hub-item">
+              <button class="settings-collapse-btn hub-toggle" id="specialListToggle" type="button" aria-expanded="false" aria-controls="specialListBody">
+                <span class="settings-collapse-arrow" aria-hidden="true">▾</span>
+                <span class="settings-collapse-title">选择名单</span>
+                <em class="hub-hint">白名单 / 大额名单 · 置顶 · 管理条目</em>
+              </button>
+              <div class="special-list-body hub-body hidden" id="specialListBody"></div>
+            </div>
+          </div>
+        </div>
+        <div class="settings-block">
+          <div class="section-head">
+            <h3>自动归类</h3>
+          </div>
+          <div class="settings-list">
+            <label class="settings-row">
+              <span>
+                <strong>使用关键词规则自动归类</strong>
+                <em>导入账单、打开待确认页时，自动把匹配关键词的账目归到对应分类</em>
+              </span>
+              <input type="checkbox" id="autoApplyToggle">
+            </label>
+          </div>
+        </div>
+        <div class="settings-block" id="importBlock">
+          <div class="section-head">
+            <h3>导入账单</h3>
+            <button class="primary" id="importOpenBtn" type="button">导入</button>
+          </div>
+          <div class="import-panel hidden" id="importPanel">
+            <div class="import-intro">
+              <p>把新导出的账单文件放进一个文件夹，先「预览」看会新增多少条，再确认导入。全程只读预览，不会改账本。</p>
+              <ul>
+                <li><strong>支持格式</strong>：支付宝 CSV、微信 XLSX、招商银行 PDF、邮政银行 PDF（银行 PDF 需为电子流水，扫描图片版无法识别）</li>
+                <li><strong>文件目录</strong>：默认是程序目录下的 <code id="importDefaultDirHint">账单导入</code> 文件夹（可用环境变量 <code>BILL_IMPORT_DIR</code> 改），也可以在下面直接填</li>
+                <li><strong>放法</strong>：可以按 <code>微信</code> / <code>支付宝</code> / <code>招商银行</code> / <code>邮政银行</code> 分子文件夹，直接丢在根目录也能识别</li>
+                <li><strong>导入后</strong>：新账目进入<strong>待确认</strong>，分类留空，由你在待确认页逐条处理</li>
+                <li><strong>自动跳过</strong>：同源重复、跨来源同一笔（按支付方式判定归属）、账本里已有的，都不会重复记账</li>
+              </ul>
+            </div>
+            <div class="import-path-row">
+              <label>账单文件夹
+                <input id="importPath" placeholder="账单导入文件夹的完整路径（留空用默认）" autocomplete="off">
+              </label>
+              <button class="secondary" id="importPreviewBtn" type="button">预览</button>
+            </div>
+            <div class="import-status muted" id="importStatus"></div>
+            <div class="import-result hidden" id="importResult"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal hidden" id="rulePanel">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>查看规则</h3>
+        <button class="icon-button" id="closeRulePanel" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="view-tabs" id="rulePanelTabs">
+        <button class="active" data-rule-tab="category">分类规则</button>
+        <button data-rule-tab="keyword">关键词规则</button>
+      </div>
+      <div class="modal-body" id="rulePanelBody"></div>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="catQuickPick">
+    <div class="modal-card modal-card-sm">
+      <div class="modal-head">
+        <h3>改分类</h3>
+        <button class="icon-button" id="closeCatQuickPick" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="muted" id="catQuickPickInfo"></div>
+      <div class="modal-body" id="catQuickPickBody"></div>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="newListDialog">
+    <div class="modal-card modal-card-sm">
+      <div class="modal-head">
+        <h3>建立名单</h3>
+        <button class="icon-button" id="closeNewListDialog" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="new-list-hint muted" id="newListHint"></div>
+        <label class="new-list-field">名字
+          <input id="newListName" placeholder="例如：每月话费、固定支出" autocomplete="off">
+        </label>
+        <label class="new-list-field">复制自
+          <select id="newListCopyFrom"></select>
+        </label>
+        <div class="new-list-msg" id="newListMsg"></div>
+        <div class="new-list-actions">
+          <button class="primary" id="newListConfirm" type="button">确定</button>
+          <button class="secondary" id="newListCancel" type="button">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/dashboard.js?v=20261114-rename"></script>
+</body>
+</html>
