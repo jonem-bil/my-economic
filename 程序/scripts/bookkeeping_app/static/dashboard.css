@@ -2441,6 +2441,33 @@
     }
     .plain-table td.list-add-cell { white-space: nowrap; }
 
+    /* ===== 2026-11-15 追加：对象明细里的「勾选 + 批量设置分类」 ===== */
+    .plain-table .batch-check input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: var(--accent);
+      vertical-align: middle;
+      cursor: pointer;
+    }
+    .plain-table .batch-check input[type="checkbox"]:disabled {
+      cursor: not-allowed;
+      opacity: .45;
+    }
+    /* 勾上的行给个底色，深色主题靠 --accent / --panel 混色，不写死颜色 */
+    .plain-table tr.is-picked { background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+    .plain-table tr.is-picked:hover { background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
+    .batch-pick-bar { margin: 2px 0 10px; }
+    .batch-pick-bar > .muted {
+      margin-left: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .batch-pick-bar select { min-width: 200px; }
+    .batch-pick-bar button:disabled {
+      cursor: not-allowed;
+      opacity: .45;
+    }
+
     /* ===== 2026-11-13 追加：快捷位空槽 + 建立名单对话框 + 管理条目 ===== */
     .cp-label.cp-label-empty {
       gap: 8px;

@@ -119,6 +119,9 @@
     let batchDetailObject = '';
     let batchHiddenScope = '';
     let batchHiddenIds = readBatchHiddenKeys();
+    // 单对象明细视图的「勾选 + 批量设置分类」：勾选按 batchEntryKey 存，重渲染按 key 回填
+    let batchDetailPicked = new Set();
+    let batchDetailCategory = '';
     // 收支趋势图：bar（默认）| line
     let trendChartMode = localStorage.getItem('bookkeeping.trendChartMode') === 'line' ? 'line' : 'bar';
     let lastTrendPoints = null;
@@ -5367,6 +5370,23 @@
       return String(item && item.transaction_object || '').trim() || '（空）';
     }
 
+    // 能不能进批量勾选 / 批量改分类。
+    // /api/unconfirmed 是把两张表 union all 拼起来的，source 就是那张表的名字：
+    //   source === 'pending'     → entries 表里 status='pending' 的行，/api/batch-confirm 能直接改；
+    //   source === 'unconfirmed' → unconfirmed_entries（导入后待归类的暂存表），
+    //                              批量接口内部只查 entries 表，这些行只能走单条 /api/confirm。
+    // 两张表的 id 各自自增、会重号，所以 unconfirmed 的行绝不能进批量 id 列表，
+    // 否则一个 id 可能落到同号的 entries 行上，把别的账目改掉。
+    function batchItemBatchable(item) {
+      const src = String((item && item.source) || '').trim();
+      return !src || src === 'pending';
+    }
+
+    function clearBatchDetailPicks() {
+      batchDetailPicked.clear();
+      batchDetailCategory = '';
+    }
+
     function batchHiddenItems(scope = '') {
       return pendingItems
         .filter(item => batchHiddenIds.has(batchEntryKey(item)))
@@ -5393,6 +5413,8 @@
     function bindBatchViewEvents(wrap) {
       wrap.querySelectorAll('[data-batch-expand]').forEach(btn => btn.onclick = (event) => {
         event.stopPropagation();
+        // 换对象：勾选和已选分类不跟着走，一律清掉
+        clearBatchDetailPicks();
         batchDetailObject = btn.dataset.batchExpand;
         batchView = 'detail';
         renderPendingBatch();
@@ -5405,6 +5427,8 @@
         } else {
           batchView = 'groups';
           batchDetailObject = '';
+          // 返回列表：清空明细视图的勾选
+          clearBatchDetailPicks();
         }
         batchHiddenScope = '';
         renderPendingBatch();
@@ -5475,6 +5499,8 @@
 
     function setPendingBatchMode(on) {
       pendingBatchMode = on;
+      // 进出「按对象批量」都清空明细勾选，避免下次进来看到上次的残留勾选
+      clearBatchDetailPicks();
       if (on) {
         batchView = 'groups';
         batchDetailObject = '';
@@ -5515,8 +5541,39 @@
       const hiddenRows = batchHiddenItems(name);
       const expense = rows.filter(item => moneyTone(item) !== 'income').reduce((sum, item) => sum + (Number(item.amount_cents) || 0), 0);
       const income = rows.filter(item => moneyTone(item) === 'income').reduce((sum, item) => sum + (Number(item.amount_cents) || 0), 0);
-      const body = rows.map(item => `
-        <tr>
+      const pickable = rows.filter(batchItemBatchable);
+      // 勾选集合只保留「当前还看得见、且可批量操作」的 key：
+      // 切换对象 / 筛选变化 / 隐藏掉某条之后，不会剩下指向已不在本视图里的幽灵勾选
+      const pickableKeys = new Set(pickable.map(batchEntryKey));
+      [...batchDetailPicked].forEach(key => { if (!pickableKeys.has(key)) batchDetailPicked.delete(key); });
+      const pickedCount = batchDetailPicked.size;
+      // 下拉里的分类：本对象的行可能跨类型，就取这些行的类型分类并集
+      // （与上层分组视图的 batchCategoryOptionsHtml 同一个口径：只列真实分类 + 转账）
+      const catValues = [];
+      const catSeen = new Set();
+      pickable.forEach(item => categoriesForType(item.type).forEach(cat => {
+        if (!cat || catSeen.has(cat)) return;
+        catSeen.add(cat);
+        catValues.push(cat);
+      }));
+      catValues.push('转账');
+      const catOptions = categoryOptionsHtml(catValues, batchDetailCategory, true);
+      const barHint = !rows.length
+        ? '当前筛选下没有可见条目，先回上层清空筛选'
+        : (!pickable.length
+          ? '这个对象下的条目都来自导入暂存表，只能单条确认'
+          : (catSeen.size ? '勾上左边复选框，再选分类' : '这些类型下还没有分类，只能选「转账」，或去「设置 → 修改分类」新建'));
+      const body = rows.map(item => {
+        const key = batchEntryKey(item);
+        const batchable = batchItemBatchable(item);
+        const checked = batchable && batchDetailPicked.has(key);
+        // 不可批量的行也占一格（置灰 + title 说明原因），列才不会错位
+        const pickCell = batchable
+          ? `<input type="checkbox" data-batch-pick="${esc(key)}"${checked ? ' checked' : ''} title="勾上后可批量设置分类">`
+          : `<input type="checkbox" disabled title="这条来自导入暂存表（source=unconfirmed），批量接口只认 entries 表，只能单条确认；放开勾选会把同号的其他账目改错">`;
+        return `
+        <tr${checked ? ' class="is-picked"' : ''}>
+          <td class="batch-check">${pickCell}</td>
           <td>${esc(item.transaction_time || '')}</td>
           <td>${esc(item.type || '')}</td>
           <td class="money-cell">${esc(signedMoney(Number(item.amount_cents) || 0, moneyTone(item)))}</td>
@@ -5524,10 +5581,11 @@
           <td>${esc(item.account || '')}</td>
           <td>${esc(item.note || '')}</td>
           <td class="batch-detail-actions">
-            <button type="button" class="secondary" data-batch-hide="${esc(batchEntryKey(item))}">隐藏</button>
+            <button type="button" class="secondary" data-batch-hide="${esc(key)}">隐藏</button>
             ${item.source && item.source !== 'pending' ? '' : `<button type="button" class="cat-edit-btn" data-cat-edit="${esc(item.id)}">改分类</button>`}
           </td>
-        </tr>`).join('');
+        </tr>`;
+      }).join('');
       wrap.innerHTML = `
         <div class="browser-bar">
           <button type="button" class="secondary" data-batch-back="groups">← 返回按对象批量</button>
@@ -5536,11 +5594,115 @@
           <span class="muted">当前筛选下可见 ${rows.length} 笔${hiddenRows.length ? ` · 已隐藏 ${hiddenRows.length} 笔` : ''}</span>
         </div>
         <div class="entry-controls"><div class="muted">支出 ${esc(signedMoney(expense, 'expense'))} · 收入 ${esc(signedMoney(income, 'income'))}</div></div>
+        <div class="batch-apply batch-pick-bar">
+          <span>已选 <strong id="batchPickCount">${pickedCount}</strong> 条</span>
+          <select id="batchPickCategory" aria-label="批量设置的分类">${catOptions}</select>
+          <button class="primary" id="batchPickApply" type="button">批量设为该分类</button>
+          <button class="secondary" id="batchPickSelectAll" type="button">全选</button>
+          <button class="secondary" id="batchPickClear" type="button">清空</button>
+          <span class="muted" id="batchPickHint">${esc(barHint)}</span>
+        </div>
         <table class="plain-table">
-          <thead><tr><th>时间</th><th>类型</th><th>金额</th><th>分类</th><th>账户</th><th>备注</th><th>操作</th></tr></thead>
-          <tbody>${body || '<tr><td colspan="7" class="muted">这个对象在当前筛选下没有可见条目</td></tr>'}</tbody>
+          <thead><tr><th class="batch-check"><input type="checkbox" id="batchPickAllBox" title="全选当前可见且可批量操作的行"></th><th>时间</th><th>类型</th><th>金额</th><th>分类</th><th>账户</th><th>备注</th><th>操作</th></tr></thead>
+          <tbody>${body || '<tr><td colspan="8" class="muted">这个对象在当前筛选下没有可见条目</td></tr>'}</tbody>
         </table>`;
       bindBatchViewEvents(wrap);
+      bindBatchPickEvents(wrap);
+    }
+
+    // 明细「勾选 + 批量设置分类」的交互：勾选只在页面上就地更新，不整块重渲染
+    // （整块重渲染会丢滚动位置、打断正在点的复选框）
+    function bindBatchPickEvents(wrap) {
+      const boxes = [...wrap.querySelectorAll('[data-batch-pick]')];
+      const allBox = $('batchPickAllBox');
+      const applyBtn = $('batchPickApply');
+      const countLabel = $('batchPickCount');
+      const sync = () => {
+        const count = batchDetailPicked.size;
+        if (countLabel) countLabel.textContent = String(count);
+        boxes.forEach(box => {
+          const tr = box.closest('tr');
+          if (tr) tr.classList.toggle('is-picked', batchDetailPicked.has(box.dataset.batchPick));
+        });
+        if (allBox) {
+          allBox.checked = boxes.length > 0 && count >= boxes.length;
+          allBox.indeterminate = count > 0 && count < boxes.length;  // 部分选中
+          allBox.disabled = boxes.length === 0;
+        }
+        const sel = $('batchPickCategory');
+        batchDetailCategory = sel ? (sel.value || '') : '';
+        if (applyBtn) applyBtn.disabled = !(batchDetailCategory && count > 0);
+        if ($('batchPickSelectAll')) $('batchPickSelectAll').disabled = boxes.length === 0;
+        if ($('batchPickClear')) $('batchPickClear').disabled = count === 0;
+      };
+      const setAll = (on) => {
+        boxes.forEach(box => {
+          box.checked = on;
+          if (on) batchDetailPicked.add(box.dataset.batchPick);
+          else batchDetailPicked.delete(box.dataset.batchPick);
+        });
+        sync();
+      };
+      boxes.forEach(box => {
+        box.onchange = () => {
+          const key = box.dataset.batchPick;
+          if (box.checked) batchDetailPicked.add(key);
+          else batchDetailPicked.delete(key);
+          sync();
+        };
+      });
+      if (allBox) allBox.onchange = () => setAll(allBox.checked);
+      if ($('batchPickSelectAll')) $('batchPickSelectAll').onclick = () => setAll(true);
+      if ($('batchPickClear')) $('batchPickClear').onclick = () => setAll(false);
+      if ($('batchPickCategory')) $('batchPickCategory').onchange = () => sync();
+      if (applyBtn) applyBtn.onclick = async () => {
+        const category = batchDetailCategory;
+        if (!category) {
+          $('status').textContent = '先在下拉里选一个分类';
+          return;
+        }
+        const name = batchDetailObject;
+        const targets = batchFilteredPending()
+          .filter(item => batchObjectName(item) === name)
+          .filter(item => batchItemBatchable(item) && batchDetailPicked.has(batchEntryKey(item)));
+        if (!targets.length) {
+          $('status').textContent = '还没有勾选任何条目';
+          return;
+        }
+        const ids = [...new Set(targets.map(item => Number(item.id)))];
+        // 条数多才二次确认：>10 条一次改掉代价大值得拦一下；10 条以内不弹，
+        // 因为要先勾复选框、再选分类、再点按钮，误触概率已经很低，多弹一层只是拖慢
+        if (ids.length > 10 && !confirm(`将把 ${ids.length} 条账目设为「${categoryLabel(category)}」？\n\n对象：${name}\n点确定后立刻写入，这些条目会变成已确认。`)) return;
+        applyBtn.disabled = true;
+        try {
+          const res = await api('/api/batch-confirm', {
+            method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({ids, category})
+          });
+          const okCount = Number(res && res.ok) || 0;
+          const failed = (res && res.failed) || [];
+          if (!okCount) {
+            // 一条都没成功：勾选和已选分类都留着，原样再点一次就能重试
+            $('status').textContent = `批量设置失败：${failed.length} 条一条都没改成（${(failed[0] && failed[0].error) || '未知原因'}），勾选已保留，可重试`;
+            applyBtn.disabled = false;
+            return;
+          }
+          // 只把没成功的留在勾选里，成功的那些已经变了分类、不该再被重复提交
+          const failedIds = new Set(failed.map(row => Number(row.id)));
+          const keepKeys = targets.filter(item => failedIds.has(Number(item.id))).map(batchEntryKey);
+          batchDetailPicked.clear();
+          keepKeys.forEach(key => batchDetailPicked.add(key));
+          if (!failed.length) batchDetailCategory = '';
+          await refresh();
+          $('status').textContent = `已把 ${okCount} 条设为「${categoryLabel(category)}」` + (failed.length ? `；另有 ${failed.length} 条没改成，勾选还留着，可以再试一次` : '');
+        } catch (err) {
+          // 失败不清空勾选，方便原样重试
+          $('status').textContent = `批量设置失败（勾选已保留，可重试）：${err.message}`;
+          applyBtn.disabled = false;
+        }
+      };
+      sync();
     }
 
     // 隐藏的条目：从对象详情进来只看本对象，从批量界面进来列出全部并标注「（隐藏）」
