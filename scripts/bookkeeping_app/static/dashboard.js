@@ -1827,10 +1827,189 @@
         drawTrend('cashflowTrend', analysis.trend, progress);
         drawPie('expensePie', analysis.expenseCategories, 'expense', progress);
         drawPie('incomePie', analysis.incomeCategories, 'income', progress);
+        drawDailyBars(lastDailyBarPoints, progress);
         if (progress < 1) requestAnimationFrame(frame);
       }
       requestAnimationFrame(frame);
     }
+
+    // ═══════════ 近 30 天每日收支：横向条形图（原生 Canvas 手绘，无任何图表库）═══════════
+    // 每根柱子 = 一个自然日，柱子横向延伸、从上到下逐日排列，行高固定 24px：
+    // canvas 逻辑高度 = 柱子数 × 24；外层 .daily-bar-scroll 固定 420px 高 + overflow-y:auto，
+    // 超出部分在容器里滚 —— 柱子永远不被压扁，滚动时也不用重绘（浏览器自己滚）。
+    const DAILY_BAR_DAYS = 30;
+    const DAILY_BAR_ROW_H = 24;
+    const dailyBarHoverRows = {};
+    let lastDailyBarPoints = [];
+
+    // 数值文本：正数带 +、负数带 -、0 就是 0.00（不加符号）；复用页面现有的 money() / signedMoney()
+    function dailyBarValueText(net) {
+      if (!Number(net)) return money(0);
+      return signedMoney(net, net > 0 ? 'income' : 'expense');
+    }
+
+    // 日期标签：2026-11-01 → 11-01（定长 5 字符，永远不会压到右边的数值）
+    function dailyBarDayLabel(day) {
+      const text = String(day || '');
+      return text.length >= 10 ? text.slice(5) : text;
+    }
+
+    function dailyBarCanvasWidth() {
+      const canvas = $('dailyBarChart');
+      if (!canvas) return 0;
+      const wrap = canvas.parentElement;
+      const scroll = $('dailyBarScroll');
+      const width = Math.min(
+        wrap ? wrap.clientWidth : 0,
+        scroll ? scroll.clientWidth : Infinity
+      );
+      // 视图切走时（#home 被 hidden）宽度读出来是 0：这时先不画，回到总览页会按真实宽度重画
+      return width > 0 ? width : 0;
+    }
+
+    function drawDailyBars(points, progress = 1) {
+      const canvas = $('dailyBarChart');
+      if (!canvas) return;
+      const width = dailyBarCanvasWidth();
+      if (!width) return;
+      lastDailyBarPoints = points;
+      const rows = Math.max(points.length, 1);
+      // 柱子少到撑不满一屏时，用 max-height 把容器收紧，不留大片空白；
+      // 30 天（30×24 = 720px）时仍是 CSS 的 420px 固定高 + 容器内滚动。
+      const scroll = $('dailyBarScroll');
+      if (scroll) scroll.style.maxHeight = `${rows * DAILY_BAR_ROW_H}px`;
+      // ★ 逻辑高度 = 柱子数 × 24px（柱子越多 canvas 越高，绝不压缩柱高）
+      const {ctx, width: W, height: H} = prepareCanvas(canvas, width, rows * DAILY_BAR_ROW_H);
+      ctx.clearRect(0, 0, W, H);
+      // 背景圆角 + 描边：和 drawTrend() 同一套画法
+      roundedRect(ctx, 1, 1, W - 2, H - 2, 8);
+      ctx.fillStyle = colorMixPanel();
+      ctx.fill();
+      ctx.strokeStyle = cssVar('--line');
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      dailyBarHoverRows['dailyBarChart'] = [];
+      const hasData = points.some(point => Number(point.income_cents || 0) || Number(point.expense_cents || 0));
+      if (!hasData) {
+        ctx.fillStyle = cssVar('--muted');
+        ctx.font = chartFont(14);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('暂无数据', W / 2, H / 2);
+        ctx.textBaseline = 'alphabetic';
+        return;
+      }
+      const labelFont = chartFont(12, 650);
+      const valueFont = chartFont(12, 700);
+      // 每根柱子 = 当日净收支（收入 − 支出）；正数走收入色、负数走支出色，0 显示 0.00
+      const rowsData = points.map(point => {
+        const income = Number(point.income_cents || 0);
+        const expense = Number(point.expense_cents || 0);
+        const net = income - expense;
+        return {
+          day: point.day,
+          income,
+          expense,
+          net,
+          tone: net > 0 ? 'income' : net < 0 ? 'expense' : 'neutral',
+          text: dailyBarValueText(net),
+        };
+      });
+      // 数值列宽度取「最宽的那一条」并整列右对齐 → 日期标签与数值永远不会重叠
+      ctx.font = valueFont;
+      const valueWidth = Math.ceil(Math.max(...rowsData.map(row => ctx.measureText(row.text).width)));
+      const maxAbs = Math.max(...rowsData.map(row => Math.abs(row.net)), 1);
+      const pad = {left: 12, right: 12};
+      const labelWidth = 46;                    // '11-01' 定长 5 字符，留 46px 富余
+      const barLeft = pad.left + labelWidth;
+      const barRight = W - pad.right - valueWidth - 10;
+      const trackWidth = Math.max(20, barRight - barLeft);
+      const barHeight = 12;
+      rowsData.forEach((row, index) => {
+        const rowTop = index * DAILY_BAR_ROW_H;
+        const centerY = rowTop + DAILY_BAR_ROW_H / 2;
+        if (index > 0) {
+          ctx.strokeStyle = cssVar('--line');
+          ctx.globalAlpha = .5;
+          ctx.beginPath();
+          ctx.moveTo(6, rowTop);
+          ctx.lineTo(W - 6, rowTop);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+        // 左：日期标签
+        ctx.font = labelFont;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = cssVar('--muted');
+        ctx.fillText(dailyBarDayLabel(row.day), pad.left, centerY);
+        // 中：横向柱子（长度 ∝ |净额| ÷ 本窗口最大 |净额|）
+        const barY = centerY - barHeight / 2;
+        if (!row.net) {
+          // 当天收支相抵或没有数据：不画柱子，只留 2px 占位短桩，右边照样显示 0.00
+          ctx.fillStyle = cssVar('--line');
+          roundedRect(ctx, barLeft, barY, 2, barHeight, 1);
+          ctx.fill();
+        } else {
+          const barWidth = Math.max(2, trackWidth * (Math.abs(row.net) / maxAbs) * progress);
+          ctx.fillStyle = toneColor(row.tone);
+          roundedRect(ctx, barLeft, barY, barWidth, barHeight, Math.min(4, barWidth / 2));
+          ctx.fill();
+        }
+        // 右：数值（统一右对齐到最宽数值处）
+        ctx.font = valueFont;
+        ctx.textAlign = 'right';
+        ctx.fillStyle = row.net ? toneColor(row.tone) : cssVar('--muted');
+        ctx.fillText(row.text, W - pad.right, centerY);
+        dailyBarHoverRows['dailyBarChart'].push({
+          top: rowTop,
+          bottom: rowTop + DAILY_BAR_ROW_H,
+          day: row.day,
+          income: row.income,
+          expense: row.expense,
+          net: row.net,
+        });
+      });
+      ctx.textBaseline = 'alphabetic';
+      ctx.textAlign = 'left';
+    }
+
+    // 悬停明细：按行（y 坐标）命中，交互方式参照 bindTrendHover()
+    function bindDailyBarHover() {
+      const canvas = $('dailyBarChart');
+      const tip = $('dailyBarTip');
+      const card = $('dailyBarCard');
+      if (!canvas || !tip || !card) return;
+      canvas.addEventListener('mousemove', (event) => {
+        const rect = canvas.getBoundingClientRect();
+        const y = (event.clientY - rect.top) * (canvas.height / (window.devicePixelRatio || 1)) / Math.max(rect.height, 1);
+        const hit = (dailyBarHoverRows['dailyBarChart'] || []).find(row => y >= row.top && y < row.bottom);
+        if (!hit) {
+          tip.style.display = 'none';
+          return;
+        }
+        tip.innerHTML = `<strong>${esc(hit.day)}</strong>`
+          + `收入：${esc(signedMoney(hit.income, 'income'))}<br>`
+          + `支出：${esc(signedMoney(hit.expense, 'expense'))}<br>`
+          + `净额：${esc(dailyBarValueText(hit.net))}`;
+        // tooltip 挂在卡片上（不在滚动容器里），滚到底部时也不会被裁掉；
+        // 位置再夹一次，保证整块提示都落在卡片范围内，不会飘到上面的图上去
+        const cardRect = card.getBoundingClientRect();
+        tip.style.display = 'block';
+        const tipHeight = tip.offsetHeight || 72;
+        const minTop = tipHeight + 10;
+        tip.style.top = `${Math.max(minTop, Math.min(event.clientY - cardRect.top, Math.max(minTop, cardRect.height - 6)))}px`;
+        tip.style.left = `${Math.max(80, Math.min(event.clientX - cardRect.left, Math.max(80, cardRect.width - 80)))}px`;
+      });
+      canvas.addEventListener('mouseleave', () => {
+        tip.style.display = 'none';
+      });
+      $('dailyBarScroll')?.addEventListener('scroll', () => {
+        tip.style.display = 'none';
+      }, {passive: true});
+    }
+
+    bindDailyBarHover();
 
     function bindTrendHover(canvasId, tipId) {
       const canvas = $(canvasId);
@@ -2036,6 +2215,26 @@
       };
     }
 
+    // 「近 30 天每日收支」的数据源：不新增接口，直接把一个 30 天窗口丢给 aggregateRange 拿 trend。
+    // 这样 reportableEntry 过滤、收入/支出方向判定（increaseTypes / decreaseTypes）、
+    // 按天补齐空行（daysInRange）全都是同一套口径，和 KPI / 收支趋势 / 饼图完全一致。
+    function dailyBarPoints() {
+      const today = new Date();
+      const end = ymd(today);
+      const windowStart = ymd(addDays(today, -(DAILY_BAR_DAYS - 1)));
+      // 数据不足 30 天：左端收到「最早一条参与收支统计的账目」那天 —— 有几天画几根，不补空行
+      let earliest = '';
+      entries.forEach(entry => {
+        if (!reportableEntry(entry)) return;
+        const day = entryDay(entry);
+        if (!day || day > end) return;
+        if (!earliest || day < earliest) earliest = day;
+      });
+      const start = earliest && earliest > windowStart ? earliest : windowStart;
+      const analysis = aggregateRange({start, end});
+      return {start, end, points: analysis.trend};
+    }
+
     function updatePeriodVisibility() {
       $('moreControls').classList.toggle('hidden', periodMode !== 'more');
       $('prevCycle').classList.toggle('hidden', !['year', 'month', 'more'].includes(periodMode));
@@ -2113,6 +2312,16 @@
       document.querySelectorAll('[data-expense-category-level]').forEach(btn => btn.classList.toggle('active', btn.dataset.expenseCategoryLevel === expenseCategoryLevel));
       const range = currentRange();
       const analysis = aggregateRange(range);
+      // 近 30 天每日收支：这张图固定以「今天」为右端（它本身就是「最近 30 天」），
+      // 不跟着上方月/年/全部周期走；周期切换时这里会重算重绘，但口径仍是最近 30 天。
+      const daily = dailyBarPoints();
+      lastDailyBarPoints = daily.points;
+      const dailyRangeText = $('dailyBarRange');
+      if (dailyRangeText) {
+        dailyRangeText.textContent = daily.points.length
+          ? `${slashDate(daily.start)} → ${slashDate(daily.end)}`
+          : '';
+      }
       $('rangeStartText').textContent = slashDate(range.start);
       $('rangeEndText').textContent = slashDate(range.end);
       $('mIncome').textContent = signedMoney(analysis.income, 'income');
@@ -3056,7 +3265,9 @@
       $(view).classList.remove('hidden');
       $('pageTitle').textContent = titles[view] || '账簿';
       $('pageTitle').dataset.view = view;
-      $('periodPanel').classList.toggle('hidden', view !== 'home');
+      if ($('periodPanel')) $('periodPanel').classList.toggle('hidden', view !== 'home');
+      // 回到总览页时按当前真实宽度重画一次（图表在隐藏状态下量不到宽度，重画才不会变形）
+      if (view === 'home' && summaryData) updateOverview();
       if (view === 'entries') renderEntryView();
       if (view === 'settings') {
         reloadListDefs().then(renderSpecialLists).catch(err => $('status').textContent = err.message);

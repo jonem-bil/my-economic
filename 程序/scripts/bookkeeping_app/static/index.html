@@ -145,6 +145,22 @@
             </div>
           </div>
         </div>
+        <!-- 近 30 天每日收支：横向条形图（原生 Canvas 手绘，不用任何图表库）。
+             每根柱子 = 一个自然日，行高固定 24px；canvas 逻辑高度 = 行数 × 24，
+             外层 .daily-bar-scroll 固定高、overflow-y:auto —— 超出就在容器里滚，柱子不被压扁。 -->
+        <div class="section daily-bar-card" id="dailyBarCard">
+          <div class="section-head">
+            <h3>近 30 天每日收支</h3>
+            <span class="muted daily-bar-range" id="dailyBarRange"></span>
+          </div>
+          <div class="daily-bar-scroll" id="dailyBarScroll">
+            <div class="chart-wrap">
+              <canvas id="dailyBarChart" width="900" height="240"></canvas>
+            </div>
+          </div>
+          <div class="daily-bar-note">每根柱子 = 当日净收支（收入 − 支出）；鼠标悬停看当日收入 / 支出 / 净额明细</div>
+          <div class="chart-tip daily-bar-tip" id="dailyBarTip"></div>
+        </div>
       </section>
 
       <section id="entries" class="view section hidden">

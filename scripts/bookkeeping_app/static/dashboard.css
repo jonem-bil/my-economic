@@ -2782,6 +2782,50 @@
       padding-top: 10px;
     }
 
+    /* ===== 总览：近 30 天每日收支（横向条形图，原生 Canvas） =====
+       高度自适应的关键：
+         · canvas 的逻辑高度由 JS 设成「柱子数 × 24px」，柱子永远 24px 一行，不被压扁；
+         · .daily-bar-scroll 自身固定 420px 高 + overflow-y:auto，
+           超出的部分在这个容器里滚（滚动时不重绘 canvas，浏览器自己滚）。
+       JS 会额外设一次 max-height = 柱子数 × 24：柱子不足一屏时容器收紧、不留空白，
+       柱子超过一屏时该值 > 420px，仍由这里的 height:420px 生效 → 容器内滚动。
+       scrollbar-gutter: stable 让滚动条一出现就预留位置，避免宽度抖动导致横向溢出。 */
+    .daily-bar-card {
+      position: relative;
+      display: grid;
+      grid-template-rows: auto auto auto;
+      min-height: 0;
+    }
+    .daily-bar-card .section-head { margin-bottom: 8px; }
+    .daily-bar-range {
+      font-family: var(--font-ui);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .daily-bar-scroll {
+      height: 420px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-gutter: stable;
+      border-radius: 8px;
+    }
+    .daily-bar-scroll .chart-wrap { position: relative; }
+    /* canvas 的高度由 JS 按「柱数 × 24」内联设定，优先级高于全局 canvas{height:230px} */
+    .daily-bar-scroll canvas { display: block; max-width: 100%; }
+    .daily-bar-note {
+      margin-top: 8px;
+      font-family: var(--font-ui);
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    /* tooltip 挂在卡片上（不在滚动容器里），滚动时不会被裁掉 */
+    .daily-bar-tip { font-family: var(--font-ui); }
+
+    @media (max-width: 940px) {
+      .daily-bar-scroll { height: 360px; }
+    }
+
     /* ===== 消费对象详情：日期范围筛选（替代月份 chips） ===== */
     .cp-date-range { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; }
     .cp-date-field { display: grid; gap: 4px; font-size: 11.5px; color: var(--muted); font-weight: 750; }
