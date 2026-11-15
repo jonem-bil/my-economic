@@ -1841,6 +1841,10 @@
     const DAILY_BAR_ROW_H = 24;
     const dailyBarHoverRows = {};
     let lastDailyBarPoints = [];
+    // 每根柱子的命中区间 {top, bottom, day, ...}（逻辑像素，相对 canvas 顶部），
+    // 点击时用 Math.floor(y / DAILY_BAR_ROW_H) 反查「点的是第几天」。
+    // 由 drawDailyBars() 每次重绘时重建，日/周期一换就自动同步，不需要额外维护。
+    let lastDailyBarRows = [];
 
     // 数值文本：正数带 +、负数带 -、0 就是 0.00（不加符号）；复用页面现有的 money() / signedMoney()
     function dailyBarValueText(net) {
@@ -1873,6 +1877,7 @@
       const width = dailyBarCanvasWidth();
       if (!width) return;
       lastDailyBarPoints = points;
+      lastDailyBarRows = [];
       const rows = Math.max(points.length, 1);
       // 柱子少到撑不满一屏时，用 max-height 把容器收紧，不留大片空白；
       // 30 天（30×24 = 720px）时仍是 CSS 的 420px 固定高 + 容器内滚动。
@@ -1970,6 +1975,9 @@
           net: row.net,
         });
       });
+      // 点击命中表：直接复用上面为悬停建好的命中区间（同一份数据），
+      // 保证「tooltip 说哪一天」和「点开哪一天」永远一致；空数据时这份表是空的，点了没反应。
+      lastDailyBarRows = dailyBarHoverRows['dailyBarChart'].slice();
       ctx.textBaseline = 'alphabetic';
       ctx.textAlign = 'left';
     }
@@ -2010,6 +2018,123 @@
     }
 
     bindDailyBarHover();
+
+    // ═══════════ 每日收支：点某一天的柱子 → 弹出当天全部账目明细 ═══════════
+    // 命中换算：canvas 的逻辑高度 = 柱子数 × 24，第 index 根柱子占 [index*24, (index+1)*24)。
+    // 滚动偏移不需要自己加/减：getBoundingClientRect() 给的是「当前视口坐标」，
+    // 容器滚动后 rect.top 会跟着变（甚至变成负数），所以 (clientY - rect.top) 直接就是
+    // 「画布内的逻辑坐标」—— 滚没滚、滚到哪儿，浏览器已经替我们算进去了。
+    function dailyBarRowIndexAt(clientY) {
+      const canvas = $('dailyBarChart');
+      if (!canvas || !lastDailyBarRows.length) return -1;
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.height) return -1;
+      // 鼠标在画布之外（例如滚到一半时画布上下沿已经出了可视区）一律不响应
+      if (clientY < rect.top || clientY > rect.top + rect.height) return -1;
+      // CSS 高度 → 逻辑高度；正常是 1:1，仍按 dpr 折算，与 bindDailyBarHover() 用同一套算法
+      const logicalY = (clientY - rect.top) * ((canvas.height / (window.devicePixelRatio || 1)) / rect.height);
+      const index = Math.floor(logicalY / DAILY_BAR_ROW_H);
+      const row = lastDailyBarRows[index];
+      // 只有确实落在这一行的区间里才算命中：画布底部多出来的空白不响应
+      if (!row || logicalY < row.top || logicalY >= row.bottom) return -1;
+      return index;
+    }
+
+    // 某一天的全部账目：只取参与收支统计的（reportableEntry），按时间升序（同一时刻按 id 稳定排序）
+    function dailyBarDetailRows(day) {
+      const target = String(day || '');
+      if (!target) return [];
+      return entries
+        .filter(row => reportableEntry(row) && entryDay(row) === target)
+        .sort((a, b) => String(a.transaction_time || '').localeCompare(String(b.transaction_time || ''))
+          || (Number(a.id) || 0) - (Number(b.id) || 0));
+    }
+
+    function renderDailyBarDetail(day) {
+      const title = $('dailyBarDetailTitle');
+      const sum = $('dailyBarDetailSum');
+      const body = $('dailyBarDetailBody');
+      if (!title || !sum || !body) return;
+      const rows = dailyBarDetailRows(day);
+      const income = rows.filter(isIncomeRow).reduce((total, row) => total + (Number(row.amount_cents) || 0), 0);
+      const expense = rows.filter(row => !isIncomeRow(row)).reduce((total, row) => total + (Number(row.amount_cents) || 0), 0);
+      const net = income - expense;
+      title.textContent = `${day} 明细`;
+      // 小计格式与柱子右侧的数值保持一致：有金额才带 +/- 号，为 0 就是纯 0.00——
+      // 没有账目的那天三项自然都是 0.00，不会显示成 +0.00 / -0.00
+      const incomeText = income ? signedMoney(income, 'income') : money(0);
+      const expenseText = expense ? signedMoney(expense, 'expense') : money(0);
+      const netText = dailyBarValueText(net);
+      const netTone = net > 0 ? 'income' : net < 0 ? 'expense' : 'neutral-money';
+      // 颜色走页面现有的 .income / .expense / .neutral-money，深色主题自动跟随
+      sum.innerHTML = `<span>收入 <b class="income">${esc(incomeText)}</b></span>`
+        + `<span>支出 <b class="expense">${esc(expenseText)}</b></span>`
+        + `<span>净额 <b class="${netTone}">${esc(netText)}</b></span>`
+        + `<span class="muted">共 ${rows.length} 笔</span>`;
+      body.innerHTML = rows.length
+        ? readOnlyEntryTable(rows, {showObject: true, showCategory: true, showOps: false})
+        : '<div class="daily-bar-detail-empty">这一天没有账目</div>';
+      body.scrollTop = 0;
+    }
+
+    function dailyBarDetailIsOpen() {
+      const modal = $('dailyBarDetail');
+      return Boolean(modal) && !modal.classList.contains('hidden');
+    }
+
+    function openDailyBarDetail(day) {
+      const modal = $('dailyBarDetail');
+      if (!modal) return;
+      renderDailyBarDetail(day);
+      // 打开弹窗时把悬停 tooltip 收起来，免得它压在遮罩下面露一角
+      if ($('dailyBarTip')) $('dailyBarTip').style.display = 'none';
+      modal.classList.remove('hidden');
+    }
+
+    function closeDailyBarDetail() {
+      if ($('dailyBarDetail')) $('dailyBarDetail').classList.add('hidden');
+    }
+
+    function bindDailyBarClick() {
+      const canvas = $('dailyBarChart');
+      if (canvas) {
+        // 光标：移到有数据的那一根上变手型（悬停 tooltip 由 bindDailyBarHover() 独立负责，互不干扰）
+        canvas.addEventListener('mousemove', (event) => {
+          canvas.style.cursor = dailyBarRowIndexAt(event.clientY) >= 0 ? 'pointer' : '';
+        });
+        canvas.addEventListener('mouseleave', () => {
+          canvas.style.cursor = '';
+        });
+        canvas.addEventListener('click', (event) => {
+          const index = dailyBarRowIndexAt(event.clientY);
+          if (index < 0) return;
+          const row = lastDailyBarRows[index];
+          if (!row || !row.day) return;
+          // 点柱子只开这个明细弹窗，不让事件继续冒泡到页面级的点击委托
+          event.stopPropagation();
+          openDailyBarDetail(row.day);
+        });
+      }
+      const modal = $('dailyBarDetail');
+      if (!modal) return;
+      // 关闭方式：右上角 ×、底部「关闭」按钮、点遮罩空白处、按 Esc（见下方 keydown）
+      if ($('closeDailyBarDetail')) $('closeDailyBarDetail').onclick = () => closeDailyBarDetail();
+      if ($('dailyBarDetailClose')) $('dailyBarDetailClose').onclick = () => closeDailyBarDetail();
+      modal.onclick = (event) => {
+        if (event.target === modal) closeDailyBarDetail();
+      };
+      // 弹窗内部的按钮点击不再向外冒泡：避免误触页面上的其他点击委托
+      modal.addEventListener('click', (event) => {
+        if (event.target.closest('button')) event.stopPropagation();
+      });
+      // Esc 关闭：只在明细弹窗自己开着时生效，
+      // 不抢 #rulePanel / #catQuickPick 各自的 Esc 逻辑（它们各自判断自己的 hidden 状态）
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && dailyBarDetailIsOpen()) closeDailyBarDetail();
+      });
+    }
+
+    bindDailyBarClick();
 
     function bindTrendHover(canvasId, tipId) {
       const canvas = $(canvasId);
@@ -3526,9 +3651,12 @@
     function readOnlyEntryTable(rows, options = {}) {
       const showObject = options.showObject !== false;
       const showCategory = options.showCategory !== false;
+      // showOps: false → 不渲染「操作」列（改分类按钮）。默认 true，既有调用方行为不变；
+      // 只读场景（如每日明细弹窗）用它，避免在弹窗里误触其他交互。
+      const showOps = options.showOps !== false;
       // 单条加入名单：按传进来的 kind 顺序并排渲染，每个 kind 一列
       const listAddKinds = (options.listAddKinds || []).filter(kind => listDefByKey(kind));
-      const cols = 3 + (showObject ? 1 : 0) + (showCategory ? 1 : 0) + 1 + listAddKinds.length + 1;
+      const cols = 3 + (showObject ? 1 : 0) + (showCategory ? 1 : 0) + 1 + listAddKinds.length + (showOps ? 1 : 0);
       const listIdSets = new Map(listAddKinds.map(kind => [kind, entryIdSet(kind)]));
       const body = rows.map(row => `
         <tr>
@@ -3541,7 +3669,7 @@
           ${listAddKinds.map(kind => `<td class="list-add-cell">${listIdSets.get(kind).has(Number(row.id))
             ? '<span class="muted">已在</span>'
             : `<button type="button" class="icon-button add" data-add-list="${esc(kind)}" data-add-entry="${esc(row.id)}" title="加入${esc(listLabelOf(kind))}" aria-label="加入${esc(listLabelOf(kind))}">＋</button>`}</td>`).join('')}
-          <td><button type="button" class="cat-edit-btn" data-cat-edit="${esc(row.id)}">改分类</button></td>
+          ${showOps ? `<td><button type="button" class="cat-edit-btn" data-cat-edit="${esc(row.id)}">改分类</button></td>` : ''}
         </tr>`).join('');
       return `<table class="plain-table">
         <thead><tr>
@@ -3550,7 +3678,7 @@
           ${showCategory ? '<th>分类</th>' : ''}
           <th>备注</th>
           ${listAddKinds.map(kind => `<th>${esc(listLabelOf(kind))}</th>`).join('')}
-          <th>操作</th>
+          ${showOps ? '<th>操作</th>' : ''}
         </tr></thead>
         <tbody>${body || `<tr><td colspan="${cols}" class="muted">暂无数据</td></tr>`}</tbody>
       </table>`;

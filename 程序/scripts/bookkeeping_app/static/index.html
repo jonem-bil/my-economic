@@ -323,6 +323,23 @@
     </div>
   </div>
 
+  <!-- 近 30 天每日收支：点某一天的柱子 → 弹出当天全部账目明细。
+       列表放在 .modal-body 里（自带 overflow:auto），账目很多时在弹窗内部滚动，
+       .modal-card 的 max-height:86vh 保证不会撑破屏幕。 -->
+  <div class="modal hidden" id="dailyBarDetail">
+    <div class="modal-card daily-bar-detail-card">
+      <div class="modal-head">
+        <h3 id="dailyBarDetailTitle">明细</h3>
+        <button class="icon-button" id="closeDailyBarDetail" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="daily-bar-detail-sum" id="dailyBarDetailSum"></div>
+      <div class="modal-body daily-bar-detail-body" id="dailyBarDetailBody"></div>
+      <div class="daily-bar-detail-actions">
+        <button class="secondary" id="dailyBarDetailClose" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal hidden" id="newListDialog">
     <div class="modal-card modal-card-sm">
       <div class="modal-head">

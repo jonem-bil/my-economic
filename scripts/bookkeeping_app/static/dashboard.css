@@ -2822,6 +2822,38 @@
     /* tooltip 挂在卡片上（不在滚动容器里），滚动时不会被裁掉 */
     .daily-bar-tip { font-family: var(--font-ui); }
 
+    /* ===== 每日收支：点柱子 → 当天明细弹窗 =====
+       复用通用 .modal / .modal-card；卡片限高 86vh，正文区自己滚（账目 50 条也不撑破屏幕）。
+       颜色全部走主题变量，深色主题自动跟随。 */
+    .daily-bar-detail-card { width: min(1080px, 100%); }
+    .daily-bar-detail-sum {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 20px;
+      padding: 0 2px 10px;
+      border-bottom: 1px dashed var(--line);
+      font-family: var(--font-ui);
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--muted);
+    }
+    .daily-bar-detail-sum b { font-size: 14px; font-weight: 900; }
+    .daily-bar-detail-body { min-height: 0; overflow: auto; }
+    .daily-bar-detail-body .plain-table th { position: sticky; top: 0; z-index: 1; background: var(--panel); }
+    /* 只有「备注」列换行：编号 / 时间 / 金额 / 交易对象 / 分类 一律单行，
+       否则在弹窗这种宽度下「未分类」「日期+时分秒」会被挤成两行 */
+    .daily-bar-detail-body .plain-table th:nth-child(-n+5),
+    .daily-bar-detail-body .plain-table td:nth-child(-n+5) { white-space: nowrap; }
+    .daily-bar-detail-empty {
+      padding: 18px 4px;
+      font-family: var(--font-ui);
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--muted);
+    }
+    .daily-bar-detail-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
     @media (max-width: 940px) {
       .daily-bar-scroll { height: 360px; }
     }
