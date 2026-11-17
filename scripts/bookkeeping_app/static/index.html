@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>My Economic · 我的经济</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=20261114-rename">
+  <link rel="stylesheet" href="/static/dashboard.css?v=20261117-quality2">
 </head>
 <body>
   <div class="app">
@@ -187,9 +187,9 @@
         <div id="qualityPanel" class="section quality-panel hidden">
           <div class="section-head">
             <h3>待质量审核</h3>
-            <span class="muted" id="qualityScanHint">本地只读扫描</span>
+            <span class="muted" id="qualityScanHint">本地扫描 · 可就地处理</span>
           </div>
-          <p class="muted quality-intro">本地只读扫描，不消耗 token，不会修改任何账目。扫描四类问题：内部划转被当收入 / 疑似重复 / 孤儿分类 / 异常大额。进入本页不会自动扫描，点下面的「开始扫描」才开始。</p>
+          <p class="muted quality-intro">本地扫描，不消耗 token，不联网。扫描四类问题：内部划转被当收入 / 疑似重复 / 孤儿分类 / 异常大额。进入本页不会自动扫描，点下面的「开始扫描」才开始。扫出来之后可以直接在每一条下面改分类；判断是误报就点「已判断」，今后扫描不再提示。所有改动都能按 Ctrl+Z 撤回。</p>
           <div class="quality-actions">
             <button class="primary" id="qualityScanBtn" type="button">开始扫描</button>
             <button class="secondary" id="qualityBackBtn" type="button">← 返回待确认</button>
@@ -363,6 +363,6 @@
     </div>
   </div>
 
-  <script src="/static/dashboard.js?v=20261114-rename"></script>
+  <script src="/static/dashboard.js?v=20261117-quality2"></script>
 </body>
 </html>

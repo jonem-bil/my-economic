@@ -359,6 +359,15 @@ def init_db():
             created_at text not null
         );
 
+        create table if not exists quality_dismissals (
+            id integer primary key autoincrement,
+            rule text not null,
+            entry_id integer not null,
+            note text,
+            created_at text not null,
+            unique(rule, entry_id)
+        );
+
         """
     )
     create_entries_table(conn, "entries")
@@ -435,8 +444,8 @@ def set_initial_balance(name, amount, note=None):
     """设置账户「期初余额」——只写 accounts.initial_balance_cents，不碰流水的语义。
 
     ── 语义（务必与界面文案对齐）──────────────────────────────────────────
-    * 期初余额 = 账本第一笔流水**之前**该账户里本来有多少钱，也就是开始记账
-      那一刻该账户的余额。
+    * 期初余额 = 账本第一笔流水**之前**该账户里本来有多少钱。本项目第一笔流水
+      是 2026-07-07，所以它描述的是 2026-07-07 之前那个时点的余额。
     * 它**不是一条账目**：不产生任何 entries 记录，因此不进收支统计——KPI、
       分类占比、收支趋势、数据质量扫描器统统不受影响，也不会生成余额修正。
     * 期初余额与「余额修正」（type='余额修正'）是**互斥基准**：只要该账户存在
@@ -525,7 +534,7 @@ def initial_fund_candidates(account, days=10, min_amount_cents=50000, end_date=N
         （账户页每行的「定位期初」按钮）。
 
     窗口锚点：默认取**该账户最近一条流水的日期**，而不是「今天」。因为记账可能
-    停过一段时间，用今天做锚点永远扫不到东西；
+    停过一段时间（本项目账本停在 2026-10-08），用今天做锚点永远扫不到东西；
     用最近流水日才能真正找到「记账期间发生的大额流入」。可用 end_date 显式覆盖。
     只有 days <= 0（不限时间）时才完全不加日期条件。
 
@@ -1717,9 +1726,19 @@ def ensure_list_defs_schema(conn):
 
 
 def ensure_default_list_defs(conn):
-    """幂等：补齐 whitelist / large 两条默认记录；已存在（含被删除的墓碑）一律不动。"""
+    """幂等：补齐 whitelist / large 两条默认记录；已存在（含被删除的墓碑）一律不动。
+
+    先查再插，而不是无条件 `insert or ignore`。原因：init_db() 在每个 API 请求里都会跑一遍，
+    而 `insert or ignore` 即使命中的是唯一键冲突、一行都没写进去，SQLite 也会提交一次写事务、
+    把文件头的 change counter 推进一格。于是每开一次看板页面（12 个接口）数据库文件就被改写
+    二十多次，备份 / 云同步 / 杀毒会反复认为这份库变了。已存在时干脆一条语句都不执行。
+    """
+    existing = {row[0] for row in conn.execute("select key from counterparty_list_defs").fetchall()}
+    pending = [item for item in DEFAULT_LIST_DEFS if item[0] not in existing]
+    if not pending:
+        return
     ts = now_iso()
-    for key, label, order, is_default in DEFAULT_LIST_DEFS:
+    for key, label, order, is_default in pending:
         conn.execute(
             "insert or ignore into counterparty_list_defs"
             "(key, label, sort_order, is_default, hidden, pinned, created_at) "
@@ -2126,6 +2145,47 @@ def set_entry_category(entry_id, category, restore_status=None):
             )
         conn.commit()
         return {"ok": True, "id": entry_id, "category": category}
+    finally:
+        conn.close()
+
+
+def revert_entry_categories(items):
+    """撤销分类改动：把一批账目的分类和状态写回旧值。
+
+    items 形如 [{"id": 12, "category": "餐饮/饮料", "status": "pending"}, ...]。
+    category 允许为空（原本就未分类）；status 只在是 pending / confirmed 时才写回，
+    其余情况只还原分类，避免把状态改成意料之外的值。
+    """
+    cleaned = []
+    for raw in items or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            entry_id = int(raw.get("id"))
+        except (TypeError, ValueError):
+            continue
+        status = str(raw.get("status") or "").strip()
+        cleaned.append((entry_id, str(raw.get("category") or ""), status if status in ("pending", "confirmed") else None))
+    if not cleaned:
+        raise ValueError("items is required")
+    init_db()
+    conn = connect()
+    try:
+        ok_ids, failed = [], []
+        for entry_id, category, status in cleaned:
+            if not conn.execute("select id from entries where id = ?", (entry_id,)).fetchone():
+                failed.append({"id": entry_id, "error": "not found"})
+                continue
+            if status:
+                conn.execute(
+                    "update entries set category = ?, status = ? where id = ?",
+                    (category, status, entry_id),
+                )
+            else:
+                conn.execute("update entries set category = ? where id = ?", (category, entry_id))
+            ok_ids.append(entry_id)
+        conn.commit()
+        return {"ok": len(ok_ids), "failed": failed, "ids": ok_ids}
     finally:
         conn.close()
 
@@ -3484,6 +3544,11 @@ def scan_data_quality():
         # order by transaction_time, id 与前端 rebuildEntryNumbers() 的排序规则一致
         rows = [dict(row) for row in conn.execute("select * from entries order by transaction_time, id").fetchall()]
         own_accounts = known_own_account_names(conn)
+        # 标过「已判断」的 (规则, 账目) 组合：这些不再出现在扫描结果里
+        dismissed_pairs = {
+            (str(row["rule"]), int(row["entry_id"]))
+            for row in conn.execute("select rule, entry_id from quality_dismissals").fetchall()
+        }
     finally:
         conn.close()
 
@@ -3491,8 +3556,13 @@ def scan_data_quality():
     entry_numbers = {int(row["id"]): index + 1 for index, row in enumerate(rows)}
     valid_categories_set = valid_categories()
     items = []
+    dismissed_hits = 0
 
     def add_item(rule, row, reason, suggestion, **extra):
+        nonlocal dismissed_hits
+        if (rule, int(row["id"])) in dismissed_pairs:
+            dismissed_hits += 1
+            return
         rule_label, severity = QUALITY_RULES[rule]
         item = {
             "rule": rule,
@@ -3502,6 +3572,7 @@ def scan_data_quality():
             "entry_no": entry_numbers.get(int(row["id"])),
             "transaction_time": row.get("transaction_time"),
             "type": row.get("type"),
+            "status": row.get("status"),
             "amount_cents": int(row.get("amount_cents") or 0),
             "category": row.get("category"),
             "account": row.get("account"),
@@ -3722,7 +3793,117 @@ def scan_data_quality():
         "entry_count": len(rows),
         "summary": summary,
         "items": items,
+        # 被「已判断」挡掉、这次没有报出来的条数；不影响 items 本身
+        "dismissed": dismissed_hits,
+        "dismissed_total": len(dismissed_pairs),
     }
+
+
+def _clean_quality_pairs(items):
+    """把 [{rule, entry_id}, ...] 洗成合法的 (rule, entry_id) 列表，丢掉的都不合法。"""
+    cleaned = []
+    seen = set()
+    for raw in items or []:
+        if not isinstance(raw, dict):
+            continue
+        rule = str(raw.get("rule") or "").strip()
+        if rule not in QUALITY_RULES:
+            continue
+        try:
+            entry_id = int(raw.get("entry_id"))
+        except (TypeError, ValueError):
+            continue
+        key = (rule, entry_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(key)
+    return cleaned
+
+
+def dismiss_quality_issues(items, note=""):
+    """把若干「(规则, 账目)」标为已判断：以后扫描直接跳过，不再报出来。
+
+    粒度是 (规则, 账目)：同一条账目可能同时命中「内部划转」和「异常大额」，
+    忽略前者不影响后者——这两件事确实是两回事。
+    """
+    pairs = _clean_quality_pairs(items)
+    if not pairs:
+        raise ValueError("items is required")
+    init_db()
+    conn = connect()
+    try:
+        existing = {
+            int(row[0])
+            for row in conn.execute(
+                "select id from entries where id in (%s)" % ",".join("?" for _ in pairs),
+                tuple(entry_id for _, entry_id in pairs),
+            ).fetchall()
+        }
+        ts = now_iso()
+        note_text = str(note or "").strip()
+        todo = [(rule, entry_id, note_text, ts) for rule, entry_id in pairs if entry_id in existing]
+        if todo:
+            conn.executemany(
+                "insert into quality_dismissals(rule, entry_id, note, created_at) values (?, ?, ?, ?) "
+                "on conflict(rule, entry_id) do update set note = excluded.note",
+                todo,
+            )
+            conn.commit()
+        return {
+            "ok": len(todo),
+            "missing": len(pairs) - len(todo),
+            "items": [{"rule": rule, "entry_id": entry_id} for rule, entry_id, _, _ in todo],
+        }
+    finally:
+        conn.close()
+
+
+def undismiss_quality_issues(items):
+    """取消「已判断」：这些条目下次扫描会重新报出来。"""
+    pairs = _clean_quality_pairs(items)
+    if not pairs:
+        raise ValueError("items is required")
+    init_db()
+    conn = connect()
+    try:
+        removed = 0
+        for rule, entry_id in pairs:
+            cur = conn.execute(
+                "delete from quality_dismissals where rule = ? and entry_id = ?",
+                (rule, entry_id),
+            )
+            removed += cur.rowcount or 0
+        conn.commit()
+        return {"ok": removed}
+    finally:
+        conn.close()
+
+
+def list_quality_dismissals():
+    """已判断清单：给「已判断的条目」面板用，能看也能恢复。"""
+    init_db()
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """
+            select d.id, d.rule, d.entry_id, d.note, d.created_at,
+                   e.transaction_time, e.type, e.amount_cents, e.category,
+                   e.transaction_object, e.account
+            from quality_dismissals d
+            left join entries e on e.id = d.entry_id
+            order by d.created_at desc, d.id desc
+            """
+        ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            label = QUALITY_RULES.get(item["rule"])
+            item["rule_label"] = label[0] if label else item["rule"]
+            out.append(item)
+        return out
+    finally:
+        conn.close()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3811,6 +3992,8 @@ class Handler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/quality-scan":
                 # 只读：scan_data_quality 内部只发 SELECT，不写库、不联网、不调模型；每次现算，不缓存
                 self.send_json(scan_data_quality())
+            elif parsed.path == "/api/quality-dismissals":
+                self.send_json(list_quality_dismissals())
             elif parsed.path == "/api/initial-fund-candidates":
                 # 只读：扫出该账户近期「流入方向 + 单笔 ≥ 阈值」的账目，供用户决定是否改判为
                 # 「期初资金」（本金注入）。纯 SELECT，不写库、绝不自动改任何账目。
@@ -3908,6 +4091,12 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             elif parsed.path == "/api/batch-confirm":
                 self.send_json(batch_confirm(data.get("ids") or [], data.get("category"), bool(data.get("learn"))))
+            elif parsed.path == "/api/quality-dismiss":
+                self.send_json(dismiss_quality_issues(data.get("items") or [], data.get("note")))
+            elif parsed.path == "/api/quality-undismiss":
+                self.send_json(undismiss_quality_issues(data.get("items") or []))
+            elif parsed.path == "/api/category-revert":
+                self.send_json(revert_entry_categories(data.get("items") or []))
             elif parsed.path == "/api/confirm":
                 self.send_json(confirm_entry(
                     int(data["id"]),
@@ -4146,7 +4335,7 @@ def build_parser():
     p = sub.add_parser("add-initial-fund", help="记一条期初资金（本金注入）：计入余额、不计入收入")
     p.add_argument("--account", required=True)
     p.add_argument("--amount", required=True)
-    p.add_argument("--time", dest="transaction_time", help="交易时间，格式 YYYY-MM-DD HH:MM:SS；缺省为现在")
+    p.add_argument("--time", dest="transaction_time", help="交易时间，如 2026-10-08 12:00:00；缺省为现在")
     p.add_argument("--transaction-object", dest="transaction_object", help="交易对象（谁汇入的）")
     p.add_argument("--note")
 

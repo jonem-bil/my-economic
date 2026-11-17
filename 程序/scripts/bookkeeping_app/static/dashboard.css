@@ -2216,6 +2216,79 @@
       border-bottom: 1px solid var(--line);
     }
     .quality-group-head h4 { margin: 0; font-size: 15px; color: var(--ink); }
+    /* ===== 2026-11-17 追加：质量审核页就地处理 + 统一撤销提示 ===== */
+    .quality-group-head { flex-wrap: wrap; }
+    .quality-group-head .quality-mini { margin-left: auto; }
+    .quality-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin: 0 0 14px;
+    }
+    .quality-toolbar .quality-scanned { margin: 0; }
+    .quality-toolbar .quality-mini { margin-left: auto; }
+    .quality-item-ops {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px dashed var(--line);
+    }
+    .quality-cat-select {
+      min-width: 190px;
+      max-width: 340px;
+      min-height: 32px;
+      padding: 4px 10px;
+      border-radius: 8px;
+    }
+    .quality-mini {
+      min-height: 32px;
+      padding: 4px 12px;
+      font-size: 13px;
+    }
+    .quality-no-cat { font-size: 13px; }
+    /* 统一撤销提示：常驻右下角，显示还能撤销的那一步 */
+    .category-undo-hint {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 60;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      max-width: min(520px, calc(100vw - 40px));
+      padding: 10px 14px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      font-family: var(--font-zh);
+      font-size: 13px;
+      color: var(--ink);
+    }
+    .category-undo-hint button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent-ink);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .category-undo-hint kbd {
+      padding: 1px 5px;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: var(--bg);
+      font-family: var(--font-ui);
+      font-size: 11px;
+    }
     .quality-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
     .quality-item {
       display: grid;
@@ -2466,6 +2539,44 @@
     .batch-pick-bar button:disabled {
       cursor: not-allowed;
       opacity: .45;
+    }
+
+    /* ===== 2026-11-15 追加：对象明细顶部的「支出 / 收入 笔数与金额」统计 ===== */
+    .batch-detail-stats {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 10px;
+      margin-right: auto;      /* .entry-controls 默认靠右，这里推回左边 */
+      font-size: 13px;
+      line-height: 1.6;
+      font-family: var(--font-zh);
+    }
+    .batch-detail-stats .bds-cell {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 5px;
+      padding: 3px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      white-space: nowrap;
+    }
+    .batch-detail-stats .bds-cell strong { font-weight: 700; }
+    .batch-detail-stats .bds-amount { font-variant-numeric: tabular-nums; }
+    .batch-detail-stats .is-expense {
+      color: var(--red);
+      border-color: color-mix(in srgb, var(--red) 34%, var(--line));
+    }
+    .batch-detail-stats .is-income {
+      color: var(--green);
+      border-color: color-mix(in srgb, var(--green) 34%, var(--line));
+    }
+    .batch-detail-stats .is-neutral { color: var(--muted); }
+    .batch-detail-stats .is-total {
+      color: var(--ink);
+      border-style: dashed;
+      border-color: var(--line-strong);
     }
 
     /* ===== 2026-11-13 追加：快捷位空槽 + 建立名单对话框 + 管理条目 ===== */

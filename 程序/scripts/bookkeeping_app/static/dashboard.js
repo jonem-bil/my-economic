@@ -587,31 +587,123 @@
     }
 
     async function undoCategoryChange() {
-      if (!categoryUndo) return;
-      const pending = categoryUndo;
-      clearCategoryUndoTimers();
-      try {
-        await api('/api/entry-category', {
-          method: 'POST',
-          headers: {'content-type': 'application/json'},
-          body: JSON.stringify({
-            id: pending.id,
-            category: pending.fromCategory,
-            restore_status: pending.fromStatus
-          })
+      // 提示条上的「撤销」与 Ctrl+Z 走同一条路径，避免两套撤销逻辑互相踩
+      await undoLastCategoryOp();
+    }
+
+    // ═══════════ 统一撤销栈：所有分类改动都能 Ctrl+Z 退回 ═══════════
+    // 每次改动成功都登记一条记录：
+    //   {kind: 'category', label, toCategory, items: [{id, fromCategory, fromStatus}]}
+    //   {kind: 'dismiss',  label, items: [{rule, entryId}]}   ← 质量审核页的「已判断」
+    // 栈不跨刷新保留：刷新即清空，避免 Ctrl+Z 撤到很久以前的改动上去。
+    const categoryUndoStack = [];
+    const CATEGORY_UNDO_LIMIT = 20;
+
+    function ensureCategoryUndoHint() {
+      let el = $('categoryUndoHint');
+      if (el) return el;
+      el = document.createElement('div');
+      el.id = 'categoryUndoHint';
+      el.className = 'category-undo-hint hidden';
+      document.body.appendChild(el);
+      return el;
+    }
+
+    function renderCategoryUndoHint() {
+      const el = ensureCategoryUndoHint();
+      if (!categoryUndoStack.length) {
+        el.classList.add('hidden');
+        el.innerHTML = '';
+        return;
+      }
+      const top = categoryUndoStack[categoryUndoStack.length - 1];
+      el.classList.remove('hidden');
+      el.innerHTML = `<span>可撤销：${esc(top.label)}（${top.items.length} 笔）</span>
+        <button type="button" data-undo-stack>撤销 <kbd>Ctrl+Z</kbd></button>`;
+      const btn = el.querySelector('[data-undo-stack]');
+      if (btn) btn.onclick = () => undoLastCategoryOp();
+    }
+
+    function pushCategoryUndo(op) {
+      if (!op || !Array.isArray(op.items) || !op.items.length) return;
+      categoryUndoStack.push(op);
+      while (categoryUndoStack.length > CATEGORY_UNDO_LIMIT) categoryUndoStack.shift();
+      // 只有「单条改分类」才弹那个 8 秒倒计时提示；批量改动清掉旧提示，避免提示指向的不是栈顶
+      if (op.kind === 'category' && op.items.length === 1) {
+        const only = op.items[0];
+        showCategoryUndoToast({
+          id: only.id,
+          fromCategory: only.fromCategory,
+          fromStatus: only.fromStatus,
+          toCategory: op.toCategory || ''
         });
+      } else {
+        clearCategoryUndoTimers();
         categoryUndo = null;
         clearCategoryUndoToast();
+      }
+      renderCategoryUndoHint();
+    }
+
+    async function undoLastCategoryOp() {
+      if (!categoryUndoStack.length) {
+        $('status').textContent = '没有可撤销的改动';
+        return;
+      }
+      const op = categoryUndoStack[categoryUndoStack.length - 1];
+      clearCategoryUndoTimers();
+      categoryUndo = null;
+      clearCategoryUndoToast();
+      $('status').textContent = `正在撤销「${op.label}」…`;
+      try {
+        if (op.kind === 'dismiss') {
+          await api('/api/quality-undismiss', {
+            method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({items: op.items.map(it => ({rule: it.rule, entry_id: it.entryId}))})
+          });
+        } else {
+          const res = await api('/api/category-revert', {
+            method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({
+              items: op.items.map(it => ({id: it.id, category: it.fromCategory, status: it.fromStatus}))
+            })
+          });
+          const failed = (res && res.failed) || [];
+          if (failed.length) {
+            $('status').textContent = `撤销「${op.label}」时有 ${failed.length} 笔没还原（其余已恢复）`;
+          }
+        }
+        categoryUndoStack.pop();
+        renderCategoryUndoHint();
+        if (qualityDismissed) qualityDismissed = null;
         await refresh();
-        $('status').textContent = `已撤销分类改动，恢复为「${categoryLabel(pending.fromCategory) || '未分类'}」`;
+        const doneText = `已撤销「${op.label}」：${op.items.length} 笔`;
+        // 质量页的结果是扫描那一刻的快照，撤销后必须按当前数据重算，
+        // 否则列表里还留着已经被撤回去的那几条
+        if (qualityScan && qualityScan.state === 'done') {
+          await runQualityScan();
+        }
+        $('status').textContent = doneText;
       } catch (err) {
-        // 撤销失败：给出错误提示，提示条继续保留可再点，界面不卡住
+        // 撤销失败：这条留在栈顶，还能再按一次 Ctrl+Z 重试
         $('status').textContent = `撤销失败：${err.message}`;
-        categoryUndo = pending;
-        armCategoryUndoTimers(8);
-        renderCategoryUndoToast();
       }
     }
+
+    // Ctrl+Z / Cmd+Z。焦点在输入框里时不拦，免得抢掉输入框自己的撤销。
+    document.addEventListener('keydown', event => {
+      const key = String(event.key || '').toLowerCase();
+      if (key !== 'z') return;
+      if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return;
+      const target = event.target;
+      const tag = String((target && target.tagName) || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || (target && target.isContentEditable)) return;
+      if (!categoryUndoStack.length) return;
+      event.preventDefault();
+      undoLastCategoryOp();
+    });
 
     function scheduleEntryDelete(id) {
       if (pendingCategoryDelete) finalizePendingCategoryDelete();
@@ -3282,6 +3374,45 @@
     };
     const QUALITY_RULE_ORDER = ['transfer_as_income', 'duplicate', 'orphan_category', 'outlier_amount'];
     let qualityScan = {state: 'idle', data: null, error: ''};
+    // 质量页的两件事：就地改分类、把误报标成「已判断」（今后扫描不再提示）
+    let qualityView = 'scan';       // 'scan' = 扫描结果，'dismissed' = 已判断清单
+    let qualityDismissed = null;    // 已判断清单缓存，null 表示还没拉过
+
+    function qualityItemKey(item) {
+      return `${item.rule}:${item.entry_id}`;
+    }
+
+    function qualityFindItem(key) {
+      return ((qualityScan.data && qualityScan.data.items) || []).find(it => qualityItemKey(it) === key) || null;
+    }
+
+    // 处理完一条就从当前结果里拿掉，并按规则重算 summary —— 免得数字和列表对不上
+    function qualityRemoveItems(keys) {
+      const data = qualityScan.data;
+      if (!data || !Array.isArray(data.items)) return;
+      const gone = new Set(keys);
+      data.items = data.items.filter(it => !gone.has(qualityItemKey(it)));
+      const summary = {};
+      QUALITY_RULE_ORDER.forEach(rule => {
+        summary[rule] = data.items.filter(it => it.rule === rule).length;
+      });
+      data.summary = summary;
+      if (typeof data.dismissed === 'number') data.dismissed += gone.size;
+    }
+
+    // 这条账目能改到的分类：按它的 type 取合法分类。
+    // 当前分类如果是野分类（孤儿分类规则就是干这个的），单独摆一个不可选占位，不冒充合法项。
+    function qualityCategoryOptionsHtml(item) {
+      const cats = categoriesForType(item.type);
+      const current = String(item.category || '');
+      const head = current && !cats.includes(current)
+        ? `<option value="" selected>当前「${esc(categoryLabel(current) || current)}」不在合法分类里，换一个…</option>`
+        : `<option value="">${current ? '换成…' : '选一个分类…'}</option>`;
+      return head + cats.map(cat => {
+        const selected = cat === current ? ' selected' : '';
+        return `<option value="${esc(cat)}"${selected}>${esc(categoryLabel(cat))}</option>`;
+      }).join('');
+    }
 
     function qualityGroups() {
       const groups = QUALITY_RULE_ORDER.map(rule => ({rule, label: QUALITY_RULE_LABELS[rule], items: []}));
@@ -3301,8 +3432,14 @@
 
     function renderQualityItem(item) {
       const severityText = {high: '高风险', medium: '中等', low: '提示'}[item.severity] || item.severity;
+      const key = qualityItemKey(item);
       const extra = item.median_cents == null ? '' : `
         <div class="quality-meta"><span>该分类中位数：${money(item.median_cents)} 元</span><span>离群阈值：${money(item.threshold_cents)} 元</span></div>`;
+      const hasCats = categoriesForType(item.type).length > 0;
+      const catOps = hasCats
+        ? `<select class="quality-cat-select" data-q-cat="${esc(key)}" aria-label="重新划定分类">${qualityCategoryOptionsHtml(item)}</select>
+           <button type="button" class="primary quality-mini" data-q-apply="${esc(key)}">改分类</button>`
+        : '<span class="muted quality-no-cat">这个类型下没有可改的分类</span>';
       return `
         <li class="quality-item severity-${esc(item.severity || 'low')}">
           <div class="quality-item-head">
@@ -3321,6 +3458,10 @@
           ${extra}
           <div class="quality-reason">理由：${esc(item.reason || '')}</div>
           <div class="quality-suggestion">建议：${esc(item.suggestion || '')}</div>
+          <div class="quality-item-ops">
+            ${catOps}
+            <button type="button" class="secondary quality-mini" data-q-dismiss="${esc(key)}" title="标记后今后扫描不再提示这一条">已判断</button>
+          </div>
         </li>`;
     }
 
@@ -3328,6 +3469,11 @@
       const box = $('qualityResult');
       const btn = $('qualityScanBtn');
       if (!box) return;
+      if (qualityView === 'dismissed') {
+        if (btn) btn.disabled = true;
+        renderQualityDismissed(box);
+        return;
+      }
       if (btn) {
         btn.disabled = qualityScan.state === 'loading';
         btn.textContent = qualityScan.state === 'done' || qualityScan.state === 'error' ? '重新扫描' : '开始扫描';
@@ -3341,14 +3487,19 @@
         return;
       }
       if (qualityScan.state !== 'done') {
-        box.innerHTML = '<p class="muted">点上面的「开始扫描」运行本地只读体检。</p>';
+        box.innerHTML = `<p class="muted">点上面的「开始扫描」运行本地只读体检。</p>
+          <p class="muted"><button type="button" class="secondary quality-mini" id="qualityShowDismissed">查看已判断的条目</button></p>`;
         return;
       }
       const data = qualityScan.data || {};
       const groups = qualityGroups();
       const total = (data.items || []).length;
+      const skipped = Number(data.dismissed || 0);
       const head = `${renderQualitySummary()}
-        <p class="quality-scanned">扫描时间 ${esc(data.generated_at || '')}，共检查 ${Number(data.entry_count || 0)} 条账目，命中 ${total} 条。</p>`;
+        <div class="quality-toolbar">
+          <span class="quality-scanned">扫描时间 ${esc(data.generated_at || '')}，共检查 ${Number(data.entry_count || 0)} 条账目，命中 <strong>${total}</strong> 条${skipped ? `；另有 ${skipped} 条已判断，本次直接跳过` : ''}。</span>
+          <button type="button" class="secondary quality-mini" id="qualityShowDismissed">已判断的条目${Number(data.dismissed_total || 0) ? `（${Number(data.dismissed_total)}）` : ''}</button>
+        </div>`;
       if (!total) {
         box.innerHTML = `${head}<div class="quality-empty">没有发现问题：四项规则都没有命中，账目数据是干净的。</div>`;
         return;
@@ -3357,12 +3508,202 @@
         <div class="quality-group">
           <div class="quality-group-head">
             <h4>${esc(group.label)}</h4><span class="tag-count">${group.items.length}</span>
+            <button type="button" class="secondary quality-mini" data-q-dismiss-group="${esc(group.rule)}" title="把这一组全部标为已判断，今后不再提示">本组全忽略</button>
           </div>
           <ul class="quality-items">${group.items.map(renderQualityItem).join('')}</ul>
         </div>
       `).join('');
       const zeroNote = groups.filter(group => !group.items.length).map(group => group.label).join(' / ');
       box.innerHTML = `${head}${body}${zeroNote ? `<p class="muted">未命中：${esc(zeroNote)}</p>` : ''}`;
+    }
+
+    // 「已判断的条目」清单：能看是哪些、为什么忽略，也能逐条恢复
+    function renderQualityDismissed(box) {
+      const rows = Array.isArray(qualityDismissed) ? qualityDismissed : null;
+      if (!rows) {
+        box.innerHTML = '<p class="muted">读取中…</p>';
+        return;
+      }
+      const body = rows.map(row => `
+        <tr>
+          <td>${esc(row.rule_label || row.rule)}</td>
+          <td>${esc(row.transaction_time || '—')}</td>
+          <td>${esc(row.transaction_object || '—')}</td>
+          <td class="money-cell">${row.amount_cents == null ? '—' : esc(signedMoney(Number(row.amount_cents) || 0, moneyTone({type: row.type})))}</td>
+          <td>${esc(categoryLabel(row.category) || '未分类')}</td>
+          <td>${esc(row.note || '')}</td>
+          <td><button type="button" class="secondary quality-mini" data-q-restore="${esc(row.rule)}" data-q-restore-id="${esc(row.entry_id)}">恢复提示</button></td>
+        </tr>`).join('');
+      box.innerHTML = `
+        <div class="browser-bar">
+          <button type="button" class="secondary" id="qualityBackToScan">← 返回扫描结果</button>
+          <span class="browser-path">已判断的条目</span>
+          <span class="muted">${rows.length} 条 · 这些条目今后扫描时不再报出来，点「恢复提示」才会重新出现</span>
+        </div>
+        <table class="plain-table">
+          <thead><tr><th>规则</th><th>时间</th><th>交易对象</th><th>金额</th><th>分类</th><th>忽略备注</th><th>操作</th></tr></thead>
+          <tbody>${body || '<tr><td colspan="7" class="muted">还没有标记过「已判断」的条目</td></tr>'}</tbody>
+        </table>`;
+    }
+
+    async function loadQualityDismissed() {
+      qualityView = 'dismissed';
+      qualityDismissed = null;
+      renderQualityPanel();
+      try {
+        qualityDismissed = await api('/api/quality-dismissals');
+      } catch (err) {
+        qualityDismissed = [];
+        $('status').textContent = `读取已判断清单失败：${err.message}`;
+      }
+      renderQualityPanel();
+    }
+
+    // 质量页的所有按钮都走这里（事件委托，重渲染后不用重新绑）
+    async function handleQualityAction(event) {
+      const box = $('qualityResult');
+      if (!box) return;
+      const showDismissed = event.target.closest('#qualityShowDismissed');
+      if (showDismissed) {
+        event.preventDefault();
+        await loadQualityDismissed();
+        return;
+      }
+      const backToScan = event.target.closest('#qualityBackToScan');
+      if (backToScan) {
+        event.preventDefault();
+        qualityView = 'scan';
+        renderQualityPanel();
+        return;
+      }
+
+      const applyBtn = event.target.closest('[data-q-apply]');
+      if (applyBtn) {
+        event.preventDefault();
+        const key = applyBtn.dataset.qApply;
+        const item = qualityFindItem(key);
+        if (!item) return;
+        const sel = box.querySelector(`select[data-q-cat="${key}"]`);
+        const picked = sel ? sel.value : '';
+        if (!picked) {
+          $('status').textContent = '先在下拉里选一个分类';
+          return;
+        }
+        const fromCategory = String(item.category || '');
+        if (picked === fromCategory) {
+          $('status').textContent = '分类没变化';
+          return;
+        }
+        const fromStatus = String(item.status || '');
+        applyBtn.disabled = true;
+        try {
+          // 带上原状态：待确认的账目在这里改分类，不应该被顺手确认掉
+          await api('/api/entry-category', {
+            method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({
+              id: Number(item.entry_id),
+              category: picked,
+              restore_status: fromStatus || undefined
+            })
+          });
+          pushCategoryUndo({
+            kind: 'category',
+            label: `质量页把编号 ${item.entry_no} 改为「${categoryLabel(picked) || picked}」`,
+            toCategory: picked,
+            items: [{id: Number(item.entry_id), fromCategory, fromStatus}]
+          });
+          qualityRemoveItems([key]);
+          await refresh();
+          renderQualityPanel();
+          $('status').textContent = `已改分类：编号 ${item.entry_no} → 「${categoryLabel(picked) || picked}」（Ctrl+Z 可撤回）`;
+        } catch (err) {
+          applyBtn.disabled = false;
+          $('status').textContent = `改分类失败：${err.message}`;
+        }
+        return;
+      }
+
+      const dismissBtn = event.target.closest('[data-q-dismiss]');
+      if (dismissBtn) {
+        event.preventDefault();
+        const key = dismissBtn.dataset.qDismiss;
+        const item = qualityFindItem(key);
+        if (!item) return;
+        dismissBtn.disabled = true;
+        try {
+          await api('/api/quality-dismiss', {
+            method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({items: [{rule: item.rule, entry_id: Number(item.entry_id)}]})
+          });
+          pushCategoryUndo({
+            kind: 'dismiss',
+            label: `忽略编号 ${item.entry_no} 的「${item.rule_label || item.rule}」`,
+            items: [{rule: item.rule, entryId: Number(item.entry_id)}]
+          });
+          qualityRemoveItems([key]);
+          qualityDismissed = null;
+          renderQualityPanel();
+          $('status').textContent = `已判断：编号 ${item.entry_no} 的「${item.rule_label || item.rule}」今后不再提示（Ctrl+Z 可恢复）`;
+        } catch (err) {
+          dismissBtn.disabled = false;
+          $('status').textContent = `标记已判断失败：${err.message}`;
+        }
+        return;
+      }
+
+      const groupBtn = event.target.closest('[data-q-dismiss-group]');
+      if (groupBtn) {
+        event.preventDefault();
+        const rule = groupBtn.dataset.qDismissGroup;
+        const group = qualityGroups().find(g => g.rule === rule);
+        if (!group || !group.items.length) return;
+        if (!confirm(`把「${group.label}」这一组的 ${group.items.length} 条全部标为已判断？\n\n今后扫描不再提示这些条目。按 Ctrl+Z 可以撤销。`)) return;
+        groupBtn.disabled = true;
+        try {
+          const payload = group.items.map(it => ({rule: it.rule, entry_id: Number(it.entry_id)}));
+          await api('/api/quality-dismiss', {
+            method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({items: payload})
+          });
+          pushCategoryUndo({
+            kind: 'dismiss',
+            label: `忽略整组「${group.label}」`,
+            items: payload.map(it => ({rule: it.rule, entryId: it.entry_id}))
+          });
+          qualityRemoveItems(group.items.map(qualityItemKey));
+          qualityDismissed = null;
+          renderQualityPanel();
+          $('status').textContent = `已把「${group.label}」的 ${payload.length} 条标为已判断（Ctrl+Z 可恢复）`;
+        } catch (err) {
+          groupBtn.disabled = false;
+          $('status').textContent = `整组忽略失败：${err.message}`;
+        }
+        return;
+      }
+
+      const restoreBtn = event.target.closest('[data-q-restore]');
+      if (restoreBtn) {
+        event.preventDefault();
+        const rule = restoreBtn.dataset.qRestore;
+        const entryId = Number(restoreBtn.dataset.qRestoreId);
+        restoreBtn.disabled = true;
+        try {
+          await api('/api/quality-undismiss', {
+            method: 'POST',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({items: [{rule, entry_id: entryId}]})
+          });
+          qualityDismissed = null;
+          await loadQualityDismissed();
+          $('status').textContent = '已恢复提示，下次扫描会重新报出来';
+        } catch (err) {
+          restoreBtn.disabled = false;
+          $('status').textContent = `恢复失败：${err.message}`;
+        }
+      }
     }
 
     async function runQualityScan() {
@@ -3373,6 +3714,7 @@
       try {
         const data = await api('/api/quality-scan');
         qualityScan = {state: 'done', data, error: ''};
+        qualityView = 'scan';
         const total = (data.items || []).length;
         $('status').textContent = `质量扫描完成：${data.entry_count || 0} 条账目命中 ${total} 条问题（${data.generated_at || ''}）`;
       } catch (err) {
@@ -3382,6 +3724,8 @@
       renderQualityPanel();
     }
     if ($('qualityScanBtn')) $('qualityScanBtn').onclick = () => { runQualityScan(); };
+    // 质量页按钮全部走事件委托：面板会整块重渲染，绑在固定容器上就不会丢
+    if ($('qualityResult')) $('qualityResult').onclick = event => { handleQualityAction(event); };
 
     async function switchView(view) {
       await commitPendingDeletes({refreshAfter: true});
@@ -5324,7 +5668,12 @@
         });
         await refresh();
         $('status').textContent = `已改分类：${categoryLabel(picked) || picked}`;
-        showCategoryUndoToast({id, fromCategory, fromStatus, toCategory: picked});
+        pushCategoryUndo({
+          kind: 'category',
+          label: `改分类为「${categoryLabel(picked) || picked}」`,
+          toCategory: picked,
+          items: [{id, fromCategory, fromStatus}]
+        });
       } catch (err) {
         $('status').textContent = err.message;
       }
@@ -5469,14 +5818,42 @@
       const map = new Map();
       batchFilteredPending().forEach(item => {
         const name = String(item.transaction_object || '').trim() || '（空）';
-        if (!map.has(name)) map.set(name, {name, items: [], total: 0, tone: 'expense'});
+        if (!map.has(name)) map.set(name, {name, items: [], total: 0, expense: 0, income: 0, neutral: 0, tone: 'expense'});
         const group = map.get(name);
         group.items.push(item);
-        group.total += Number(item.amount_cents) || 0;
-        if (moneyTone(item) === 'income') group.tone = 'income';
+        // 支出、收入、中性类型分别累计。中性类（转账 / 余额修正 / 期初资金）不进收支净额，
+        // 否则一笔转账会被算成收入或支出。
+        const amount = Math.abs(Number(item.amount_cents) || 0);
+        const tone = moneyTone(item);
+        if (tone === 'income') group.income += amount;
+        else if (tone === 'expense') group.expense += amount;
+        else group.neutral += amount;
       });
       const groups = [...map.values()];
-      if (batchFilter.sort === 'amount') groups.sort((a, b) => b.total - a.total);
+      groups.forEach(group => {
+        // 组里既有支出又有收入时只显示净额（收入 − 支出）。
+        // 以前是把两者绝对值相加、再让一笔收入把整组染成收入色，
+        // 结果「滴滴出行」这种「大量支出 + 少量退款」的组会显示成正数。
+        const hasFlow = group.income > 0 || group.expense > 0;
+        group.hasFlow = hasFlow;
+        if (hasFlow) {
+          group.total = group.income - group.expense;
+          group.tone = group.total > 0 ? 'income' : group.total < 0 ? 'expense' : 'neutral';
+        } else {
+          group.total = group.neutral;
+          group.tone = 'neutral';
+        }
+        group.totalText = hasFlow
+          ? (group.total === 0 ? '0.00' : signedMoney(group.total, group.tone))
+          : Math.abs(group.total / 100).toFixed(2);
+        // 净额会藏起退款，所以悬停时给出支出 / 收入的拆分
+        const parts = [];
+        if (group.expense) parts.push(`支出 -${(group.expense / 100).toFixed(2)}`);
+        if (group.income) parts.push(`收入 +${(group.income / 100).toFixed(2)}`);
+        if (group.neutral) parts.push(`不计收支 ${(group.neutral / 100).toFixed(2)}`);
+        group.totalHint = parts.join(' · ');
+      });
+      if (batchFilter.sort === 'amount') groups.sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
       else if (batchFilter.sort === 'time') {
         groups.sort((a, b) => String(b.items[0].transaction_time || '').localeCompare(String(a.items[0].transaction_time || '')));
       } else groups.sort((a, b) => b.items.length - a.items.length);
@@ -5532,6 +5909,28 @@
       renderPendingBatchGroups(wrap);
     }
 
+    // 对象明细顶部统计：支出 / 收入 / 不计收支 各自的笔数与金额，末尾给净额。
+    // 必须是严格三分类 —— 以前把 neutral（转账等）并进支出，笔数和金额都会虚增。
+    function batchDetailStatsHtml(rows) {
+      const sumOf = list => list.reduce((sum, item) => sum + Math.abs(Number(item.amount_cents) || 0), 0);
+      const byTone = tone => rows.filter(item => moneyTone(item) === tone);
+      const expenseRows = byTone('expense');
+      const incomeRows = byTone('income');
+      const neutralRows = byTone('neutral');
+      const expenseSum = sumOf(expenseRows);
+      const incomeSum = sumOf(incomeRows);
+      const neutralSum = sumOf(neutralRows);
+      const parts = [];
+      if (expenseRows.length) parts.push(`<span class="bds-cell is-expense">支出 <strong>${expenseRows.length}</strong> 笔 <strong class="bds-amount">${signedMoney(expenseSum, 'expense')}</strong></span>`);
+      if (incomeRows.length) parts.push(`<span class="bds-cell is-income">收入 <strong>${incomeRows.length}</strong> 笔 <strong class="bds-amount">${signedMoney(incomeSum, 'income')}</strong></span>`);
+      if (neutralRows.length) parts.push(`<span class="bds-cell is-neutral">不计收支 <strong>${neutralRows.length}</strong> 笔 <strong class="bds-amount">${(neutralSum / 100).toFixed(2)}</strong></span>`);
+      if (!parts.length) return '<span class="muted">当前筛选下没有可见条目</span>';
+      const net = incomeSum - expenseSum;
+      const netText = net === 0 ? '0.00' : signedMoney(net, net > 0 ? 'income' : 'expense');
+      parts.push(`<span class="bds-cell is-total">合计 <strong>${rows.length}</strong> 笔 · 净额 <strong class="bds-amount">${netText}</strong></span>`);
+      return parts.join('');
+    }
+
     // 单个交易对象在当前筛选下的明细（复用交互消费统计详情页的呈现方式）
     function renderPendingBatchDetail(wrap) {
       const name = batchDetailObject;
@@ -5539,8 +5938,6 @@
         .filter(item => batchObjectName(item) === name)
         .sort((a, b) => String(b.transaction_time || '').localeCompare(String(a.transaction_time || '')));
       const hiddenRows = batchHiddenItems(name);
-      const expense = rows.filter(item => moneyTone(item) !== 'income').reduce((sum, item) => sum + (Number(item.amount_cents) || 0), 0);
-      const income = rows.filter(item => moneyTone(item) === 'income').reduce((sum, item) => sum + (Number(item.amount_cents) || 0), 0);
       const pickable = rows.filter(batchItemBatchable);
       // 勾选集合只保留「当前还看得见、且可批量操作」的 key：
       // 切换对象 / 筛选变化 / 隐藏掉某条之后，不会剩下指向已不在本视图里的幽灵勾选
@@ -5593,7 +5990,7 @@
           <button type="button" class="secondary" data-batch-show-hidden="1">查看隐藏的条目${hiddenRows.length ? `（${hiddenRows.length}）` : ''}</button>
           <span class="muted">当前筛选下可见 ${rows.length} 笔${hiddenRows.length ? ` · 已隐藏 ${hiddenRows.length} 笔` : ''}</span>
         </div>
-        <div class="entry-controls"><div class="muted">支出 ${esc(signedMoney(expense, 'expense'))} · 收入 ${esc(signedMoney(income, 'income'))}</div></div>
+        <div class="entry-controls"><div class="batch-detail-stats">${batchDetailStatsHtml(rows)}</div></div>
         <div class="batch-apply batch-pick-bar">
           <span>已选 <strong id="batchPickCount">${pickedCount}</strong> 条</span>
           <select id="batchPickCategory" aria-label="批量设置的分类">${catOptions}</select>
@@ -5694,6 +6091,19 @@
           batchDetailPicked.clear();
           keepKeys.forEach(key => batchDetailPicked.add(key));
           if (!failed.length) batchDetailCategory = '';
+          const okIds = new Set(((res && res.ids) || []).map(Number));
+          pushCategoryUndo({
+            kind: 'category',
+            label: `批量设为「${categoryLabel(category)}」`,
+            toCategory: category,
+            items: targets
+              .filter(item => okIds.has(Number(item.id)))
+              .map(item => ({
+                id: Number(item.id),
+                fromCategory: String(item.category || ''),
+                fromStatus: String(item.status || '')
+              }))
+          });
           await refresh();
           $('status').textContent = `已把 ${okCount} 条设为「${categoryLabel(category)}」` + (failed.length ? `；另有 ${failed.length} 条没改成，勾选还留着，可以再试一次` : '');
         } catch (err) {
@@ -5731,7 +6141,18 @@
       bindBatchViewEvents(wrap);
     }
 
+    // 组视图的「整组勾选」只认还在待确认列表里的条目。
+    // 明细里把一个对象的条目归完类之后，这些 id 已经从 pendingItems 消失，
+    // 但仍留在 batchSelected 里：组行会显示成已选中、「已选 N 笔」虚高，
+    // 点批量确认时还会把一堆已经不存在的 id 提交上去。
+    function pruneBatchSelected() {
+      if (!batchSelected.size) return;
+      const alive = new Set(pendingItems.map(item => Number(item.id)));
+      [...batchSelected].forEach(id => { if (!alive.has(id)) batchSelected.delete(id); });
+    }
+
     function renderPendingBatchGroups(wrap) {
+      pruneBatchSelected();
       const items = batchFilteredPending();
       const groups = batchGroups();
       const catOptions = batchCategoryOptionsHtml();
@@ -5743,7 +6164,7 @@
           <td class="batch-check">${allSel ? '☑' : '☐'}</td>
           <td>${esc(group.name)}</td>
           <td class="num-cell">${group.items.length}</td>
-          <td class="money-cell">${esc(signedMoney(group.total, group.tone))}</td>
+          <td class="money-cell"${group.totalHint ? ` title="${esc(group.totalHint)}"` : ''}>${esc(group.totalText)}</td>
           <td>${esc(cats)}</td>
           <td class="batch-expand-cell"><button type="button" class="batch-expand-btn" data-batch-expand="${esc(group.name)}" title="展开这个对象的明细">＞</button></td>
         </tr>`;
@@ -5815,14 +6236,34 @@
       };
       $('batchApply').onclick = async () => {
         const category = $('batchCategory').value;
+        // 提交前再剔一次幽灵 id：渲染到现在之间可能又有条目被归完类
+        pruneBatchSelected();
         if (!category || !batchSelected.size) return;
         if (!confirm(`把选中的 ${batchSelected.size} 笔全部归到「${categoryLabel(category)}」？`)) return;
         const ids = [...batchSelected];
+        // 先把改前的分类/状态记下来，撤销时要按这份快照写回
+        const fromMap = new Map(items.map(it => [Number(it.id), {
+          category: String(it.category || ''),
+          status: String(it.status || '')
+        }]));
         try {
           const res = await api('/api/batch-confirm', {
             method: 'POST',
             headers: {'content-type': 'application/json'},
             body: JSON.stringify({ids, category})
+          });
+          const okIds = new Set(((res && res.ids) || []).map(Number));
+          pushCategoryUndo({
+            kind: 'category',
+            label: `批量归到「${categoryLabel(category)}」`,
+            toCategory: category,
+            items: [...okIds]
+              .filter(id => fromMap.has(id))
+              .map(id => ({
+                id,
+                fromCategory: fromMap.get(id).category,
+                fromStatus: fromMap.get(id).status
+              }))
           });
           batchSelected.clear();
           await refresh();
